@@ -15,7 +15,7 @@ Herdrのプラグインは接続先で動作するため、接続元Macで小さ
 
 ```text
 remote Herdr plugin
-  -> 127.0.0.1:18340 on the remote host
+  -> /tmp/herdr-remote-download-<remote-user>.sock
   -> SSH RemoteForward
   -> 127.0.0.1:18340 on the connected Mac
   -> ~/Downloads
@@ -54,13 +54,28 @@ curl -fsS http://127.0.0.1:18340/health
 
 ### 2. SSHトンネル
 
-Macの `~/.ssh/config` にある対象のHostブロックへ次を追加し、SSH接続を
-作り直します。
+Macの `~/.ssh/config` にHerdr専用のHostを追加します。通常のSSH接続と
+転送ポートを分離するため、既存のHostとは別名にしてください。このブロックは
+`Host *`より前に置きます。
 
 ```sshconfig
-Host your-server
-    RemoteForward 18340 127.0.0.1:18340
+Host your-server-herdr
+    HostName server.example.com
+    User your-name
+    IdentityFile ~/.ssh/id_ed25519
+    IdentitiesOnly yes
+    RemoteForward /tmp/herdr-remote-download-your-name.sock 127.0.0.1:18340
+    ExitOnForwardFailure yes
+    ServerAliveInterval 15
+    ServerAliveCountMax 3
+    ControlMaster no
+    ControlPath none
 ```
+
+ソケット名の `your-name` は接続先で `id -un`が表示するユーザー名に合わせます。
+Unixソケットを使うことで、古いSSHセッションと新しいセッションが同じTCPポートを
+共有する問題を避けます。`ExitOnForwardFailure yes`はソケットを作成できない場合、
+転送不能のままHerdrを起動せず、接続時点でエラーにします。
 
 ### 3. 接続先へプラグインをインストール
 
@@ -106,9 +121,12 @@ herdr server reload-config
 ```
 
 server側キーバインドをremote接続で使用するには、次のように接続します。
+接続前に残存ソケットを削除してください。古いSSHプロセスが残っていても、
+削除済みソケットは到達不能になり、新しい接続だけが同じパスを作成します。
 
 ```sh
-herdr --remote your-server --remote-keybindings server
+ssh your-server 'rm -f /tmp/herdr-remote-download-your-name.sock'
+herdr --remote your-server-herdr --remote-keybindings server
 ```
 
 ## 使い方
@@ -144,6 +162,13 @@ CodexやClaudeなどが表示した `file://` リンクをHerdr上でControl+ク
 - 既定では512 MiBを超えるファイルを転送できません。
 - launchdによる受信サービスの自動起動はmacOSのみ対応しています。
 - SSH `RemoteForward`と認証トークンの設定は、接続先ごとに必要です。
+
+## トラブルシューティング
+
+接続時に `remote port forwarding failed for listen path` と表示された場合は、
+上記の `rm -f`を実行してから再接続してください。
+転送中にSSHトンネルが失われた場合は、ファイル選択後3秒以内にpickerへ失敗理由を
+表示します。EscまたはEnterで閉じ、Herdrを再接続してください。
 
 ## 開発
 

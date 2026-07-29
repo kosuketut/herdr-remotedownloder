@@ -42,28 +42,44 @@ fn run() -> Result<()> {
     };
     filter_existing_file_targets(&mut app, &pane_cwd);
 
-    let outcome = {
-        let _restore = TerminalRestore;
-        let mut terminal = ratatui::init();
-        loop {
-            terminal.draw(|frame| draw(frame, &app))?;
-            match event::read()? {
-                Event::Key(key) => {
-                    if let Some(character) = key_to_char(key) {
-                        match app.handle_char(character) {
-                            Outcome::Continue => {}
-                            other => break other,
-                        }
+    let _restore = TerminalRestore;
+    let mut terminal = ratatui::init();
+    let outcome = loop {
+        terminal.draw(|frame| draw(frame, &app))?;
+        match event::read()? {
+            Event::Key(key) => {
+                if let Some(character) = key_to_char(key) {
+                    match app.handle_char(character) {
+                        Outcome::Continue => {}
+                        other => break other,
                     }
                 }
-                Event::Resize(_, _) => {}
-                _ => {}
             }
+            Event::Resize(_, _) => {}
+            _ => {}
         }
     };
 
     if let Outcome::Copy(selected_path) = outcome {
-        send_selected_file(&selected_path, &pane_cwd)?;
+        terminal.draw(|frame| draw_transfer(frame, &app, &selected_path, None))?;
+        if let Err(error) = send_selected_file(&selected_path, &pane_cwd) {
+            let detail = format!("{error:#}");
+            loop {
+                terminal.draw(|frame| draw_transfer(frame, &app, &selected_path, Some(&detail)))?;
+                match event::read()? {
+                    Event::Key(key) => match key.code {
+                        KeyCode::Esc | KeyCode::Enter => break,
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            break;
+                        }
+                        _ => {}
+                    },
+                    Event::Resize(_, _) => {}
+                    _ => {}
+                }
+            }
+            bail!("{detail}");
+        }
     }
     Ok(())
 }
@@ -158,6 +174,49 @@ fn draw_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
     };
     frame.render_widget(
         Paragraph::new(status).style(app.theme.status_style()),
+        status_area,
+    );
+}
+
+fn draw_transfer(frame: &mut Frame<'_>, app: &App, selected_path: &str, error: Option<&str>) {
+    let area = frame.area();
+    let mut lines = if let Some(detail) = error {
+        vec![
+            Line::from(Span::styled("Transfer failed.", app.theme.empty_style())),
+            Line::from(""),
+            Line::from(detail.to_string()),
+            Line::from(""),
+            Line::from("Press Esc or Enter to close."),
+        ]
+    } else {
+        vec![
+            Line::from("Transferring to the connected Mac..."),
+            Line::from(""),
+            Line::from(selected_path.to_string()),
+            Line::from(""),
+            Line::from("Please wait. This window closes when the transfer finishes."),
+        ]
+    };
+    let line_count = usize::from(area.height.saturating_sub(1));
+    lines.truncate(line_count);
+    frame.render_widget(Paragraph::new(lines), area);
+
+    if area.height == 0 {
+        return;
+    }
+    let status_area = Rect {
+        x: area.x,
+        y: area.y + area.height - 1,
+        width: area.width,
+        height: 1,
+    };
+    let message = if error.is_some() {
+        " download  failed  esc:close "
+    } else {
+        " download  transferring... "
+    };
+    frame.render_widget(
+        Paragraph::new(message).style(app.theme.status_style()),
         status_area,
     );
 }

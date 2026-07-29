@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import getpass
 import hashlib
 import http.client
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -20,7 +21,7 @@ import socket
 import subprocess
 import sys
 import tempfile
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
 
@@ -28,6 +29,7 @@ PLUGIN_ID = "kosukeyano.remote-download"
 DEFAULT_PORT = 18340
 DEFAULT_MAX_BYTES = 512 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 300
+PREFLIGHT_TIMEOUT_SECONDS = 3
 TOKEN_HEX_LENGTH = 64
 TRANSFER_PATH = "/v1/files"
 LAUNCHD_LABEL = "com.kosukeyano.herdr-remote-download"
@@ -57,6 +59,10 @@ def default_data_dir() -> Path:
     if root:
         return Path(root).expanduser() / "herdr-remote-download"
     return Path.home() / ".local" / "share" / "herdr-remote-download"
+
+
+def default_remote_socket_path() -> Path:
+    return Path(f"/tmp/herdr-remote-download-{getpass.getuser()}.sock")
 
 
 def _validate_token(token: str) -> str:
@@ -210,6 +216,74 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+class UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, socket_path: Path, timeout: int):
+        super().__init__("localhost", timeout=timeout)
+        self.socket_path = socket_path
+
+    def connect(self) -> None:
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(str(self.socket_path))
+
+
+def _receiver_connection(
+    host: str,
+    port: int,
+    timeout: int,
+    socket_path: Optional[Path],
+) -> http.client.HTTPConnection:
+    if socket_path is not None:
+        return UnixHTTPConnection(socket_path, timeout)
+    return http.client.HTTPConnection(host, port, timeout=timeout)
+
+
+def _receiver_endpoint(host: str, port: int, socket_path: Optional[Path]) -> str:
+    if socket_path is not None:
+        return str(socket_path)
+    return f"{host}:{port}"
+
+
+def check_receiver(
+    host: str,
+    port: int,
+    timeout: int,
+    socket_path: Optional[Path] = None,
+) -> None:
+    preflight_timeout = min(timeout, PREFLIGHT_TIMEOUT_SECONDS)
+    if preflight_timeout <= 0:
+        raise DownloadError("transfer timeout must be greater than zero")
+
+    endpoint = _receiver_endpoint(host, port, socket_path)
+    connection = _receiver_connection(host, port, preflight_timeout, socket_path)
+    try:
+        connection.request("GET", "/health")
+        response = connection.getresponse()
+        payload_bytes = response.read(16 * 1024)
+    except (OSError, http.client.HTTPException) as error:
+        raise DownloadError(
+            f"local receiver is unavailable through {endpoint}; "
+            "reconnect the Herdr remote session and verify its SSH RemoteForward"
+        ) from error
+    finally:
+        connection.close()
+
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8")) if payload_bytes else {}
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        payload = {}
+    if (
+        response.status != 200
+        or not isinstance(payload, dict)
+        or payload.get("service") != "herdr-remote-download"
+        or payload.get("status") != "ok"
+    ):
+        raise DownloadError(
+            f"unexpected service through {endpoint}; "
+            "verify the Herdr remote-download SSH RemoteForward"
+        )
+
+
 def upload_file(
     path: Path,
     *,
@@ -218,6 +292,7 @@ def upload_file(
     token: str,
     timeout: int,
     max_bytes: int = DEFAULT_MAX_BYTES,
+    socket_path: Optional[Path] = None,
 ) -> dict[str, Any]:
     token = _validate_token(token)
     try:
@@ -229,8 +304,10 @@ def upload_file(
     if size > max_bytes:
         raise DownloadError(f"file is larger than the {max_bytes} byte transfer limit")
 
+    check_receiver(host, port, timeout, socket_path)
     checksum = sha256_file(path)
-    connection = http.client.HTTPConnection(host, port, timeout=timeout)
+    endpoint = _receiver_endpoint(host, port, socket_path)
+    connection = _receiver_connection(host, port, timeout, socket_path)
     try:
         connection.putrequest("POST", TRANSFER_PATH)
         connection.putheader("Authorization", f"Bearer {token}")
@@ -246,7 +323,7 @@ def upload_file(
         payload_bytes = response.read(64 * 1024)
     except (OSError, http.client.HTTPException) as error:
         raise DownloadError(
-            f"cannot reach the local receiver at {host}:{port}: {error}"
+            f"cannot reach the local receiver through {endpoint}: {error}"
         ) from error
     finally:
         connection.close()
@@ -464,6 +541,7 @@ def command_send_context(arguments: argparse.Namespace) -> int:
             token=token,
             timeout=arguments.timeout,
             max_bytes=arguments.max_mb * 1024 * 1024,
+            socket_path=arguments.socket or default_remote_socket_path(),
         )
     except DownloadError as error:
         _notify_herdr("Remote download failed", str(error), "request")
@@ -489,6 +567,7 @@ def command_send(arguments: argparse.Namespace) -> int:
             token=read_token(arguments.token_file),
             timeout=arguments.timeout,
             max_bytes=arguments.max_mb * 1024 * 1024,
+            socket_path=arguments.socket,
         )
     except DownloadError as error:
         print(f"herdr-remote-download: {error}", file=sys.stderr)
@@ -756,6 +835,16 @@ def _add_transfer_options(parser: argparse.ArgumentParser) -> None:
         "--timeout",
         type=int,
         default=DEFAULT_TIMEOUT_SECONDS,
+    )
+    parser.add_argument(
+        "--socket",
+        type=Path,
+        default=(
+            Path(os.environ["HERDR_DOWNLOAD_SOCKET"])
+            if os.environ.get("HERDR_DOWNLOAD_SOCKET")
+            else None
+        ),
+        help="remote Unix socket forwarded to the connected machine",
     )
     parser.add_argument(
         "--max-mb",

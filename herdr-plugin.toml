@@ -1,6 +1,6 @@
 id = "kosukeyano.remote-download"
 name = "Remote File Download"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.7.0"
 description = "Download a selected remote file to the machine running herdr --remote."
 platforms = ["linux", "macos"]

@@ -3,9 +3,12 @@ import http.client
 import json
 import os
 from pathlib import Path
+import socket
+import socketserver
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 import herdr_remote_download as download
 
@@ -125,6 +128,57 @@ class ReceiverTests(unittest.TestCase):
             )
 
         self.assertFalse(self.download_dir.exists())
+
+    def test_unavailable_receiver_fails_before_hashing_file(self):
+        source = self.root / "report.txt"
+        source.write_text("report", encoding="utf-8")
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        unavailable_port = probe.getsockname()[1]
+        probe.close()
+
+        with mock.patch.object(download, "sha256_file") as checksum:
+            with self.assertRaisesRegex(download.DownloadError, "receiver is unavailable"):
+                download.upload_file(
+                    source,
+                    host="127.0.0.1",
+                    port=unavailable_port,
+                    token=self.TOKEN,
+                    timeout=1,
+                )
+
+        checksum.assert_not_called()
+
+    def test_upload_through_unix_socket(self):
+        source = self.root / "unix report.txt"
+        source.write_bytes(b"unix socket transfer")
+        socket_path = self.root / "receiver.sock"
+        unix_server = socketserver.UnixStreamServer(
+            str(socket_path), download.DownloadRequestHandler
+        )
+        unix_server.destination = self.download_dir
+        unix_server.token = self.TOKEN
+        unix_server.max_bytes = 1024 * 1024
+        unix_server.verbose = False
+        thread = threading.Thread(target=unix_server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = download.upload_file(
+                source,
+                host="127.0.0.1",
+                port=0,
+                token=self.TOKEN,
+                timeout=5,
+                socket_path=socket_path,
+            )
+        finally:
+            unix_server.shutdown()
+            unix_server.server_close()
+            thread.join(timeout=2)
+
+        saved = Path(result["path"])
+        self.assertEqual(saved.name, source.name)
+        self.assertEqual(saved.read_bytes(), b"unix socket transfer")
 
     def test_rejects_checksum_mismatch_and_removes_partial_file(self):
         body = b"corrupted"

@@ -1,6 +1,6 @@
 [package]
 name = "herdr-remote-download-picker"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.88"
 description = "Select a file path in a remote Herdr pane and download it to the connected Mac."
