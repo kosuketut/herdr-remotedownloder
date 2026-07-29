@@ -129,6 +129,34 @@ ssh your-server 'rm -f /tmp/herdr-remote-download-your-name.sock'
 herdr --remote your-server-herdr --remote-keybindings server
 ```
 
+この2コマンドを従来どおり `hr your-server`で実行する場合は、Macの
+`~/.zshrc`へ次を追加します。`your-server`と `your-name`は上の設定と
+同じ値へ置き換えてください。
+
+```zsh
+unalias hr 2>/dev/null
+hr() {
+  if [[ "$1" == "your-server" ]]; then
+    shift
+    command ssh your-server \
+      'rm -f /tmp/herdr-remote-download-your-name.sock' || return
+    command herdr --remote-keybindings server --remote your-server-herdr "$@"
+  else
+    command herdr --remote-keybindings server --remote "$@"
+  fi
+}
+compdef _herdr hr
+```
+
+`unalias`は、現在のシェルに古い `hr`エイリアスが残っている場合も、関数へ
+確実に置き換えるために必要です。設定後、一度だけ再読込して確認します。
+
+```sh
+source ~/.zshrc
+whence -w hr
+# hr: function
+```
+
 ## 使い方
 
 ### 表示中のファイルパスを選ぶ
