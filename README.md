@@ -1,17 +1,19 @@
 # Herdr Remote File Download
 
-`herdr --remote` の接続先にあるファイルを、接続元Macの `~/Downloads` へ
-ダウンロードするHerdrプラグインです。
+English | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-表示中のファイルパスをヒント文字で選択するほか、CodexやClaudeなどが表示した
-`file://` リンクからも転送できます。PDF、PPTX、画像、アーカイブなど、
-拡張子に関係なく通常のファイルを転送します。
+A Herdr plugin that downloads files from a `herdr --remote` host to
+`~/Downloads` on the connected Mac.
 
-## 仕組み
+Select visible file paths with hint characters, or transfer files from
+`file://` links displayed by Codex, Claude, and other tools. It supports regular
+files of any extension, including PDFs, PPTX files, images, and archives.
 
-Herdrのプラグインは接続先で動作するため、接続元Macで小さな受信サービスを
-起動します。転送には公開ポートを使用せず、SSH `RemoteForward`の
-ループバック接続だけを使用します。
+## How it works
+
+Herdr plugins run on the remote host, so a small receiver service runs on the
+connected Mac. Transfers use only an SSH `RemoteForward`; no public port is
+opened.
 
 ```text
 remote Herdr plugin
@@ -21,24 +23,24 @@ remote Herdr plugin
   -> ~/Downloads
 ```
 
-転送は64文字のランダムトークンで認証し、受信後にSHA-256を検証します。
-既定の上限は512 MiBです。同名ファイルがある場合は `name (1).ext` のように
-保存し、既存ファイルを上書きしません。
+Transfers are authenticated with a random 64-character token and verified with
+SHA-256 after receipt. The default size limit is 512 MiB. Existing files are
+never overwritten; a duplicate is saved as `name (1).ext`, for example.
 
-## 必要環境
+## Requirements
 
-- Herdr 0.7.0以降
-- 接続元: macOS、Python 3.9以降
-- 接続先: LinuxまたはmacOS、Python 3.9以降、Git、Rust/Cargo 1.88以降
-- SSH configで指定できる接続先
+- Herdr 0.7.0 or later
+- Connected machine: macOS and Python 3.9 or later
+- Remote host: Linux or macOS, Python 3.9 or later, Git, and Rust/Cargo 1.88 or later
+- A remote host defined in your SSH config
 
-## セットアップ
+## Setup
 
-以下ではSSH configの接続先名を `your-server` とします。
+The examples below use `your-server` as the existing SSH host name.
 
-### 1. Mac側の受信サービス
+### 1. Receiver service on the Mac
 
-Macでリポジトリを取得し、launchdサービスをインストールします。
+Clone the repository on the Mac and install the launchd service.
 
 ```sh
 git clone https://github.com/kosuketut/herdr-remotedownloder.git
@@ -48,15 +50,15 @@ python3 herdr_remote_download.py service-status
 curl -fsS http://127.0.0.1:18340/health
 ```
 
-受信サービスは `127.0.0.1` のみにbindし、ログを
-`~/Library/Logs/herdr-remote-download.log`へ書きます。認証トークンは
-`~/.config/herdr-remote-download/token`に作成されます。
+The receiver binds only to `127.0.0.1` and writes logs to
+`~/Library/Logs/herdr-remote-download.log`. Its authentication token is created
+at `~/.config/herdr-remote-download/token`.
 
-### 2. SSHトンネル
+### 2. SSH tunnel
 
-Macの `~/.ssh/config` にHerdr専用のHostを追加します。通常のSSH接続と
-転送ポートを分離するため、既存のHostとは別名にしてください。このブロックは
-`Host *`より前に置きます。
+Add a dedicated Herdr host to `~/.ssh/config` on the Mac. Use a different name
+from the normal SSH host so the forwarding configuration remains isolated.
+Place this block before `Host *`.
 
 ```sshconfig
 Host your-server-herdr
@@ -72,24 +74,25 @@ Host your-server-herdr
     ControlPath none
 ```
 
-ソケット名の `your-name` は接続先で `id -un`が表示するユーザー名に合わせます。
-Unixソケットを使うことで、古いSSHセッションと新しいセッションが同じTCPポートを
-共有する問題を避けます。`ExitOnForwardFailure yes`はソケットを作成できない場合、
-転送不能のままHerdrを起動せず、接続時点でエラーにします。
+Replace `your-name` in the socket path with the user name returned by `id -un`
+on the remote host. The Unix socket prevents old and new SSH sessions from
+sharing the same TCP forwarding port. `ExitOnForwardFailure yes` stops Herdr at
+connection time if the socket cannot be created.
 
-### 3. 接続先へプラグインをインストール
+### 3. Install the plugin on the remote host
 
-接続先で実行します。
+Run:
 
 ```sh
 herdr plugin install kosuketut/herdr-remotedownloder
 ```
 
-インストーラーは内容の確認後、マニフェストに従ってRust製pickerをビルドします。
+After you confirm the installation, the installer builds the Rust picker
+according to the plugin manifest.
 
-### 4. 認証トークンを接続先へコピー
+### 4. Copy the authentication token to the remote host
 
-Macで次を実行します。
+Run this on the Mac:
 
 ```sh
 ssh your-server \
@@ -100,11 +103,11 @@ ssh your-server \
   < ~/.config/herdr-remote-download/token
 ```
 
-トークンをリポジトリへ追加したり、第三者へ共有したりしないでください。
+Do not add the token to a repository or share it with anyone else.
 
-### 5. キーバインド
+### 5. Key binding
 
-接続先の `~/.config/herdr/config.toml`へ次を追加します。
+Add the following block to `~/.config/herdr/config.toml` on the remote host:
 
 ```toml
 [[keys.command]]
@@ -114,24 +117,24 @@ command = "kosukeyano.remote-download.pick"
 description = "pick a remote file to download"
 ```
 
-設定を反映します。
+Reload the configuration:
 
 ```sh
 herdr server reload-config
 ```
 
-server側キーバインドをremote接続で使用するには、次のように接続します。
-接続前に残存ソケットを削除してください。古いSSHプロセスが残っていても、
-削除済みソケットは到達不能になり、新しい接続だけが同じパスを作成します。
+To use server-side key bindings in a remote session, remove any stale socket
+before connecting. Even if an old SSH process remains, its unlinked socket is
+unreachable and the new connection creates the path again.
 
 ```sh
 ssh your-server 'rm -f /tmp/herdr-remote-download-your-name.sock'
 herdr --remote your-server-herdr --remote-keybindings server
 ```
 
-この2コマンドを従来どおり `hr your-server`で実行する場合は、Macの
-`~/.zshrc`へ次を追加します。`your-server`と `your-name`は上の設定と
-同じ値へ置き換えてください。
+To keep using `hr your-server` for these two commands, add the following
+function to `~/.zshrc` on the Mac. Replace `your-server` and `your-name` with the
+same values used above.
 
 ```zsh
 unalias hr 2>/dev/null
@@ -148,8 +151,8 @@ hr() {
 compdef _herdr hr
 ```
 
-`unalias`は、現在のシェルに古い `hr`エイリアスが残っている場合も、関数へ
-確実に置き換えるために必要です。設定後、一度だけ再読込して確認します。
+`unalias` ensures that an old `hr` alias in the current shell is replaced by
+the function. Reload the configuration once and verify the result:
 
 ```sh
 source ~/.zshrc
@@ -157,48 +160,52 @@ whence -w hr
 # hr: function
 ```
 
-## 使い方
+## Usage
 
-### 表示中のファイルパスを選ぶ
+### Select a visible file path
 
-`prefix+d`を押すと、表示中にある実在ファイルのパスへヒント文字が付きます。
-ヒント文字を入力すると、そのファイルをMacへ転送します。Escで閉じます。
+Press `prefix+d` to add hint characters to existing file paths on the visible
+screen. Type a hint to transfer that file to the Mac. Press Esc to close the
+picker.
 
-絶対パス、paneのcwdからの相対パス、`:行`、`:行:列`付きのパスを認識します。
-CodexやClaudeの出力に限らず、現在表示されている実在ファイルが対象です。
+The picker recognizes absolute paths, paths relative to the pane's current
+working directory, and paths ending in `:line` or `:line:column`. It works with
+any existing file shown on screen, not only files printed by Codex or Claude.
 
-キーバインドを使わず、actionを直接起動することもできます。
+You can also invoke the action directly:
 
 ```sh
 herdr plugin action invoke kosukeyano.remote-download.pick
 ```
 
-### `file://` リンクからダウンロード
+### Download from a `file://` link
 
-CodexやClaudeなどが表示した `file://` リンクをHerdr上でControl+クリックすると、
-リンク先のファイルを転送します。macOSでもHerdrがリンク操作として捕捉する
-修飾キーはControlです。
+Control-click a `file://` link displayed by Codex, Claude, or another tool in
+Herdr to transfer its target. On macOS, Control is the modifier Herdr captures
+for link actions.
 
-### 選択テキストからダウンロード
+### Download from selected text
 
-ファイルパスを選択して、`kosukeyano.remote-download.download` actionを
-直接呼び出すこともできます。
+Select a file path and invoke the
+`kosukeyano.remote-download.download` action directly.
 
-## 制限事項
+## Limitations
 
-- ディレクトリは転送できません。アーカイブしてから選択してください。
-- 既定では512 MiBを超えるファイルを転送できません。
-- launchdによる受信サービスの自動起動はmacOSのみ対応しています。
-- SSH `RemoteForward`と認証トークンの設定は、接続先ごとに必要です。
+- Directories cannot be transferred. Archive a directory first.
+- Files larger than 512 MiB are rejected by default.
+- Automatic receiver startup through launchd is supported only on macOS.
+- The SSH `RemoteForward` and authentication token must be configured for each remote host.
 
-## トラブルシューティング
+## Troubleshooting
 
-接続時に `remote port forwarding failed for listen path` と表示された場合は、
-上記の `rm -f`を実行してから再接続してください。
-転送中にSSHトンネルが失われた場合は、ファイル選択後3秒以内にpickerへ失敗理由を
-表示します。EscまたはEnterで閉じ、Herdrを再接続してください。
+If the connection reports `remote port forwarding failed for listen path`, run
+the `rm -f` command shown above and reconnect.
 
-## 開発
+If the SSH tunnel is lost during a transfer, the picker displays the failure
+within three seconds of selecting the file. Press Esc or Enter to close it,
+then reconnect Herdr.
+
+## Development
 
 ```sh
 python3 -m unittest discover -s tests -v
@@ -207,9 +214,8 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo build --release --locked
 ```
 
-pickerの表示とヒント割当には
-[herdr-tiny-fingers](https://github.com/hotchpotch/herdr-tiny-fingers)
-を利用しています。第三者ライセンスは
-[`LICENSES`](LICENSES)を参照してください。
+The picker UI and hint assignment use
+[herdr-tiny-fingers](https://github.com/hotchpotch/herdr-tiny-fingers).
+See [`LICENSES`](LICENSES) for third-party license information.
 
-このプロジェクトは[MIT License](LICENSE)で公開されています。
+This project is released under the [MIT License](LICENSE).
