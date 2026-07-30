@@ -13,7 +13,8 @@
 
 Herdrのプラグインは接続先で動作するため、接続元Macで小さな受信サービスを
 起動します。転送には公開ポートを使用せず、SSH `RemoteForward`の
-ループバック接続だけを使用します。
+ループバック接続だけを使用します。picker、送信、受信、サービス管理CLIは
+すべてRustで実装されています。
 
 ```text
 remote Herdr plugin
@@ -30,8 +31,8 @@ remote Herdr plugin
 ## 必要環境
 
 - Herdr 0.7.0以降
-- 接続元: macOS、Python 3.9以降
-- 接続先: LinuxまたはmacOS、Python 3.9以降、Git、Rust/Cargo 1.88以降
+- 接続元: macOS、Git、Rust/Cargo 1.88以降
+- 接続先: LinuxまたはmacOS、Git、Rust/Cargo 1.88以降
 - SSH configで指定できる接続先
 
 ## セットアップ
@@ -45,8 +46,9 @@ Macでリポジトリを取得し、launchdサービスをインストールし�
 ```sh
 git clone https://github.com/kosuketut/herdr-remotedownloder.git
 cd herdr-remotedownloder
-python3 herdr_remote_download.py install-service
-python3 herdr_remote_download.py service-status
+cargo build --release --locked
+./target/release/herdr-remote-download install-service
+./target/release/herdr-remote-download service-status
 curl -fsS http://127.0.0.1:18340/health
 ```
 
@@ -87,7 +89,8 @@ Unixソケットを使うことで、古いSSHセッションと新しいセッ�
 herdr plugin install kosuketut/herdr-remotedownloder
 ```
 
-インストーラーは内容の確認後、マニフェストに従ってRust製pickerをビルドします。
+インストーラーは内容の確認後、マニフェストに従って2つのRustバイナリを
+ビルドします。
 
 ### 4. 認証トークンを接続先へコピー
 
@@ -203,7 +206,6 @@ CodexやClaudeなどが表示した `file://` リンクをHerdr上でControl+ク
 ## 開発
 
 ```sh
-python3 -m unittest discover -s tests -v
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 cargo build --release --locked

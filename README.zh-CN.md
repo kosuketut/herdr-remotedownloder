@@ -12,7 +12,8 @@ Mac 的 `~/Downloads`。
 ## 工作原理
 
 Herdr 插件运行在远程主机上，因此需要在连接端 Mac 上启动一个小型接收服务。
-传输仅使用 SSH `RemoteForward`，不会开放任何公网端口。
+传输仅使用 SSH `RemoteForward`，不会开放任何公网端口。文件选择器、发送端、
+接收端和服务管理 CLI 均使用 Rust 实现。
 
 ```text
 remote Herdr plugin
@@ -29,8 +30,8 @@ remote Herdr plugin
 ## 环境要求
 
 - Herdr 0.7.0 或更高版本
-- 连接端：macOS、Python 3.9 或更高版本
-- 远程主机：Linux 或 macOS、Python 3.9 或更高版本、Git、Rust/Cargo 1.88 或更高版本
+- 连接端：macOS、Git、Rust/Cargo 1.88 或更高版本
+- 远程主机：Linux 或 macOS、Git、Rust/Cargo 1.88 或更高版本
 - 已在 SSH config 中定义的远程主机
 
 ## 安装设置
@@ -44,8 +45,9 @@ remote Herdr plugin
 ```sh
 git clone https://github.com/kosuketut/herdr-remotedownloder.git
 cd herdr-remotedownloder
-python3 herdr_remote_download.py install-service
-python3 herdr_remote_download.py service-status
+cargo build --release --locked
+./target/release/herdr-remote-download install-service
+./target/release/herdr-remote-download service-status
 curl -fsS http://127.0.0.1:18340/health
 ```
 
@@ -84,7 +86,7 @@ Unix 套接字可以防止新旧 SSH 会话共享同一个 TCP 转发端口。
 herdr plugin install kosuketut/herdr-remotedownloder
 ```
 
-确认安装内容后，安装程序会根据插件清单构建 Rust 文件选择器。
+确认安装内容后，安装程序会根据插件清单构建两个 Rust 二进制文件。
 
 ### 4. 将认证令牌复制到远程主机
 
@@ -198,7 +200,6 @@ herdr plugin action invoke kosukeyano.remote-download.pick
 ## 开发
 
 ```sh
-python3 -m unittest discover -s tests -v
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 cargo build --release --locked

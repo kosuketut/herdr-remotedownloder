@@ -1,6 +1,6 @@
 id = "kosukeyano.remote-download"
 name = "Remote File Download"
-version = "0.2.1"
+version = "0.3.0"
 min_herdr_version = "0.7.0"
 description = "Download a selected remote file to the machine running herdr --remote."
 platforms = ["linux", "macos"]
@@ -20,7 +20,7 @@ id = "download"
 title = "Download selected remote file"
 description = "Send the selected file path to the connected machine."
 contexts = ["selection", "pane"]
-command = ["python3", "herdr_remote_download.py", "send-context"]
+command = ["./target/release/herdr-remote-download", "send-context"]
 
 [[link_handlers]]
 id = "file-url"
