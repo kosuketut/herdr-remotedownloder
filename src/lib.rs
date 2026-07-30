@@ -5,6 +5,8 @@ use herdr_tiny_fingers::app::App;
 use herdr_tiny_fingers::hints::assign_hints;
 use herdr_tiny_fingers::patterns::{Matcher, PatternSpec};
 
+pub mod transfer;
+
 pub fn file_matcher() -> Result<Matcher> {
     let enabled_builtin_patterns = vec!["path".to_string()];
     let mut filename = PatternSpec::new(

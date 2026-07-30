@@ -13,7 +13,8 @@ files of any extension, including PDFs, PPTX files, images, and archives.
 
 Herdr plugins run on the remote host, so a small receiver service runs on the
 connected Mac. Transfers use only an SSH `RemoteForward`; no public port is
-opened.
+opened. The picker, sender, receiver, and service-management CLI are all
+implemented in Rust.
 
 ```text
 remote Herdr plugin
@@ -30,8 +31,8 @@ never overwritten; a duplicate is saved as `name (1).ext`, for example.
 ## Requirements
 
 - Herdr 0.7.0 or later
-- Connected machine: macOS and Python 3.9 or later
-- Remote host: Linux or macOS, Python 3.9 or later, Git, and Rust/Cargo 1.88 or later
+- Connected machine: macOS, Git, and Rust/Cargo 1.88 or later
+- Remote host: Linux or macOS, Git, and Rust/Cargo 1.88 or later
 - A remote host defined in your SSH config
 
 ## Setup
@@ -45,8 +46,9 @@ Clone the repository on the Mac and install the launchd service.
 ```sh
 git clone https://github.com/kosuketut/herdr-remotedownloder.git
 cd herdr-remotedownloder
-python3 herdr_remote_download.py install-service
-python3 herdr_remote_download.py service-status
+cargo build --release --locked
+./target/release/herdr-remote-download install-service
+./target/release/herdr-remote-download service-status
 curl -fsS http://127.0.0.1:18340/health
 ```
 
@@ -87,7 +89,7 @@ Run:
 herdr plugin install kosuketut/herdr-remotedownloder
 ```
 
-After you confirm the installation, the installer builds the Rust picker
+After you confirm the installation, the installer builds both Rust binaries
 according to the plugin manifest.
 
 ### 4. Copy the authentication token to the remote host
@@ -208,7 +210,6 @@ then reconnect Herdr.
 ## Development
 
 ```sh
-python3 -m unittest discover -s tests -v
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 cargo build --release --locked

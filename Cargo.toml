@@ -1,9 +1,9 @@
 [package]
-name = "herdr-remote-download-picker"
-version = "0.2.1"
+name = "herdr-remote-download"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.88"
-description = "Select a file path in a remote Herdr pane and download it to the connected Mac."
+description = "Download files from a remote Herdr pane to the connected Mac."
 license = "MIT"
 repository = "https://github.com/kosuketut/herdr-remotedownloder"
 readme = "README.md"
@@ -12,9 +12,17 @@ readme = "README.md"
 name = "herdr-remote-download-picker"
 path = "src/main.rs"
 
+[[bin]]
+name = "herdr-remote-download"
+path = "src/bin/herdr-remote-download.rs"
+
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
+clap = { version = "4.5", features = ["derive", "env"] }
 crossterm = "0.29"
 herdr-tiny-fingers = { git = "https://github.com/hotchpotch/herdr-tiny-fingers.git", rev = "2c817583fa1d5385fe4a95e2fd4cfa30fa4e915e" }
 ratatui = "0.30"
+regex = "1"
 serde_json = "1"
+sha2 = "0.10"

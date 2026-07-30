@@ -3,7 +3,7 @@ use std::process::{Command, ExitCode};
 
 use anyhow::{bail, Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use herdr_remote_download_picker::{file_matcher, filter_existing_file_targets};
+use herdr_remote_download::{file_matcher, filter_existing_file_targets};
 use herdr_tiny_fingers::app::{App, Outcome};
 use herdr_tiny_fingers::herdr_client::SocketClient;
 use herdr_tiny_fingers::theme::Theme;
@@ -105,13 +105,15 @@ fn send_selected_file(selected_path: &str, pane_cwd: &Path) -> Result<()> {
     let plugin_root = std::env::var_os("HERDR_PLUGIN_ROOT")
         .map(PathBuf::from)
         .context("HERDR_PLUGIN_ROOT is not set")?;
-    let script = plugin_root.join("herdr_remote_download.py");
+    let sender = plugin_root
+        .join("target")
+        .join("release")
+        .join("herdr-remote-download");
     let context = json!({
         "selected_text": selected_path,
         "focused_pane_cwd": pane_cwd,
     });
-    let output = Command::new("python3")
-        .arg(script)
+    let output = Command::new(sender)
         .arg("send-context")
         .env("HERDR_PLUGIN_CONTEXT_JSON", context.to_string())
         .output()
