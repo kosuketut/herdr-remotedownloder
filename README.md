@@ -1,27 +1,30 @@
-# Herdr Remote File Download
+# Herdr Remote File Transfer
 
 English | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-A Herdr plugin that downloads files from a `herdr --remote` host to
-`~/Downloads` on the connected Mac.
+A Herdr plugin that transfers files in both directions between a
+`herdr --remote` host and the connected Mac.
 
 Select visible file paths with hint characters, or transfer files from
 `file://` links displayed by Codex, Claude, and other tools. It supports regular
-files of any extension, including PDFs, PPTX files, images, and archives.
+files of any extension, including PDFs, PPTX files, images, and archives. In
+the other direction, choose a Mac file and save it to the focused remote pane's
+current directory.
 
 ## How it works
 
-Herdr plugins run on the remote host, so a small receiver service runs on the
+Herdr plugins run on the remote host, so a small transfer service runs on the
 connected Mac. Transfers use only an SSH `RemoteForward`; no public port is
-opened. The picker, sender, receiver, and service-management CLI are all
-implemented in Rust.
+opened. The Mac service and remote-to-Mac download path are implemented in
+Rust. The Mac-to-remote receiver uses only the Python standard library.
 
 ```text
 remote Herdr plugin
   -> /tmp/herdr-remote-download-<remote-user>.sock
   -> SSH RemoteForward
   -> 127.0.0.1:18340 on the connected Mac
-  -> ~/Downloads
+  <-> ~/Downloads or macOS file picker
+  <-> focused remote pane cwd
 ```
 
 Transfers are authenticated with a random 64-character token and verified with
@@ -32,14 +35,14 @@ never overwritten; a duplicate is saved as `name (1).ext`, for example.
 
 - Herdr 0.7.0 or later
 - Connected machine: macOS, Git, and Rust/Cargo 1.88 or later
-- Remote host: Linux or macOS, Git, and Rust/Cargo 1.88 or later
+- Remote host: Linux or macOS, Git, Rust/Cargo 1.88 or later, and Python 3.9 or later
 - A remote host defined in your SSH config
 
 ## Setup
 
 The examples below use `your-server` as the existing SSH host name.
 
-### 1. Receiver service on the Mac
+### 1. Transfer service on the Mac
 
 Clone the repository on the Mac and install the launchd service.
 
@@ -52,7 +55,7 @@ cargo build --release --locked
 curl -fsS http://127.0.0.1:18340/health
 ```
 
-The receiver binds only to `127.0.0.1` and writes logs to
+The service binds only to `127.0.0.1` and writes logs to
 `~/Library/Logs/herdr-remote-download.log`. Its authentication token is created
 at `~/.config/herdr-remote-download/token`.
 
@@ -90,7 +93,7 @@ herdr plugin install kosuketut/herdr-remotedownloder
 ```
 
 After you confirm the installation, the installer builds both Rust binaries
-according to the plugin manifest.
+according to the plugin manifest. The upload client needs no additional build.
 
 ### 4. Copy the authentication token to the remote host
 
@@ -117,6 +120,12 @@ key = "prefix+d"
 type = "plugin_action"
 command = "kosukeyano.remote-download.pick"
 description = "pick a remote file to download"
+
+[[keys.command]]
+key = "prefix+u"
+type = "plugin_action"
+command = "kosukeyano.remote-download.upload"
+description = "upload a file from the connected Mac"
 ```
 
 Reload the configuration:
@@ -191,11 +200,22 @@ for link actions.
 Select a file path and invoke the
 `kosukeyano.remote-download.download` action directly.
 
+### Upload from the Mac
+
+Focus the destination pane and press `prefix+u`. Choose one regular file in
+the Mac dialog. The plugin saves it in that pane's current directory and shows
+the saved path in an overlay. Press Enter to close it.
+
+```sh
+herdr plugin action invoke kosukeyano.remote-download.upload
+```
+
 ## Limitations
 
 - Directories cannot be transferred. Archive a directory first.
+- Mac-to-remote upload accepts one regular file per invocation.
 - Files larger than 512 MiB are rejected by default.
-- Automatic receiver startup through launchd is supported only on macOS.
+- Automatic transfer-service startup through launchd is supported only on macOS.
 - The SSH `RemoteForward` and authentication token must be configured for each remote host.
 
 ## Troubleshooting
@@ -213,6 +233,8 @@ then reconnect Herdr.
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 cargo build --release --locked
+python3 -m unittest discover -s tests -v
+python3 -m py_compile herdr_remote_upload.py
 ```
 
 The picker UI and hint assignment use

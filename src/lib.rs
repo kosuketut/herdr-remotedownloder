@@ -74,12 +74,14 @@ fn expand_home(value: &str) -> PathBuf {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use herdr_tiny_fingers::app::App;
     use herdr_tiny_fingers::theme::Theme;
 
     use super::{file_matcher, filter_existing_file_targets, resolve_existing_file};
+
+    static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
     struct TestDirectory {
         path: PathBuf,
@@ -87,11 +89,11 @@ mod tests {
 
     impl TestDirectory {
         fn new() -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!("herdr-download-picker-{unique}"));
+            let unique = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "herdr-download-picker-{}-{unique}",
+                std::process::id()
+            ));
             fs::create_dir_all(&path).unwrap();
             Self { path }
         }

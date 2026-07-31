@@ -1,27 +1,29 @@
-# Herdr Remote File Download
+# Herdr Remote File Transfer
 
 [English](README.md) | 日本語 | [简体中文](README.zh-CN.md)
 
-`herdr --remote` の接続先にあるファイルを、接続元Macの `~/Downloads` へ
-ダウンロードするHerdrプラグインです。
+`herdr --remote` の接続先と接続元Macの間で、ファイルを双方向に転送する
+Herdrプラグインです。
 
 表示中のファイルパスをヒント文字で選択するほか、CodexやClaudeなどが表示した
 `file://` リンクからも転送できます。PDF、PPTX、画像、アーカイブなど、
-拡張子に関係なく通常のファイルを転送します。
+拡張子に関係なく通常のファイルを転送します。逆方向はMacで選んだファイルを、
+フォーカス中のremote paneのcwdへ保存します。
 
 ## 仕組み
 
-Herdrのプラグインは接続先で動作するため、接続元Macで小さな受信サービスを
+Herdrのプラグインは接続先で動作するため、接続元Macで小さな転送サービスを
 起動します。転送には公開ポートを使用せず、SSH `RemoteForward`の
-ループバック接続だけを使用します。picker、送信、受信、サービス管理CLIは
-すべてRustで実装されています。
+ループバック接続だけを使用します。Mac側サービスとdownload処理はRust、
+Macからremoteへ保存するクライアントはPython標準ライブラリで実装しています。
 
 ```text
 remote Herdr plugin
   -> /tmp/herdr-remote-download-<remote-user>.sock
   -> SSH RemoteForward
   -> 127.0.0.1:18340 on the connected Mac
-  -> ~/Downloads
+  <-> ~/Downloads or macOS file picker
+  <-> focused remote pane cwd
 ```
 
 転送は64文字のランダムトークンで認証し、受信後にSHA-256を検証します。
@@ -32,14 +34,14 @@ remote Herdr plugin
 
 - Herdr 0.7.0以降
 - 接続元: macOS、Git、Rust/Cargo 1.88以降
-- 接続先: LinuxまたはmacOS、Git、Rust/Cargo 1.88以降
+- 接続先: LinuxまたはmacOS、Git、Rust/Cargo 1.88以降、Python 3.9以降
 - SSH configで指定できる接続先
 
 ## セットアップ
 
 以下ではSSH configの接続先名を `your-server` とします。
 
-### 1. Mac側の受信サービス
+### 1. Mac側の転送サービス
 
 Macでリポジトリを取得し、launchdサービスをインストールします。
 
@@ -52,7 +54,7 @@ cargo build --release --locked
 curl -fsS http://127.0.0.1:18340/health
 ```
 
-受信サービスは `127.0.0.1` のみにbindし、ログを
+転送サービスは `127.0.0.1` のみにbindし、ログを
 `~/Library/Logs/herdr-remote-download.log`へ書きます。認証トークンは
 `~/.config/herdr-remote-download/token`に作成されます。
 
@@ -90,7 +92,7 @@ herdr plugin install kosuketut/herdr-remotedownloder
 ```
 
 インストーラーは内容の確認後、マニフェストに従って2つのRustバイナリを
-ビルドします。
+ビルドします。uploadクライアントに追加ビルドはありません。
 
 ### 4. 認証トークンを接続先へコピー
 
@@ -117,6 +119,12 @@ key = "prefix+d"
 type = "plugin_action"
 command = "kosukeyano.remote-download.pick"
 description = "pick a remote file to download"
+
+[[keys.command]]
+key = "prefix+u"
+type = "plugin_action"
+command = "kosukeyano.remote-download.upload"
+description = "upload a file from the connected Mac"
 ```
 
 設定を反映します。
@@ -189,11 +197,22 @@ CodexやClaudeなどが表示した `file://` リンクをHerdr上でControl+ク
 ファイルパスを選択して、`kosukeyano.remote-download.download` actionを
 直接呼び出すこともできます。
 
+### Macからremoteへアップロード
+
+転送先のpaneをフォーカスして `prefix+u`を押します。Macに表示される
+ファイル選択ダイアログで通常ファイルを1つ選ぶと、そのpaneのcwdへ保存します。
+overlayに保存先が表示されたら、Enterで閉じます。
+
+```sh
+herdr plugin action invoke kosukeyano.remote-download.upload
+```
+
 ## 制限事項
 
 - ディレクトリは転送できません。アーカイブしてから選択してください。
+- Macからremoteへは1回につき通常ファイル1つを転送します。
 - 既定では512 MiBを超えるファイルを転送できません。
-- launchdによる受信サービスの自動起動はmacOSのみ対応しています。
+- launchdによる転送サービスの自動起動はmacOSのみ対応しています。
 - SSH `RemoteForward`と認証トークンの設定は、接続先ごとに必要です。
 
 ## トラブルシューティング
@@ -209,6 +228,8 @@ CodexやClaudeなどが表示した `file://` リンクをHerdr上でControl+ク
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 cargo build --release --locked
+python3 -m unittest discover -s tests -v
+python3 -m py_compile herdr_remote_upload.py
 ```
 
 pickerの表示とヒント割当には

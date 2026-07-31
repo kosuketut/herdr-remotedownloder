@@ -1,26 +1,28 @@
-# Herdr 远程文件下载
+# Herdr 远程文件传输
 
 [English](README.md) | [日本語](README.ja.md) | 简体中文
 
-这是一个 Herdr 插件，用于将 `herdr --remote` 远程主机上的文件下载到连接端
-Mac 的 `~/Downloads`。
+这是一个 Herdr 插件，用于在 `herdr --remote` 远程主机与连接端 Mac 之间
+双向传输文件。
 
 您可以通过提示字符选择当前屏幕中显示的文件路径，也可以传输 Codex、Claude
 等工具显示的 `file://` 链接。它支持任何扩展名的常规文件，包括 PDF、PPTX、
-图像和压缩包。
+图像和压缩包。反向传输时，可以在 Mac 上选择文件，并将其保存到当前聚焦的
+远程 pane 工作目录。
 
 ## 工作原理
 
-Herdr 插件运行在远程主机上，因此需要在连接端 Mac 上启动一个小型接收服务。
-传输仅使用 SSH `RemoteForward`，不会开放任何公网端口。文件选择器、发送端、
-接收端和服务管理 CLI 均使用 Rust 实现。
+Herdr 插件运行在远程主机上，因此需要在连接端 Mac 上启动一个小型传输服务。
+传输仅使用 SSH `RemoteForward`，不会开放任何公网端口。Mac 服务和下载路径
+使用 Rust；Mac 到远程的接收客户端仅使用 Python 标准库。
 
 ```text
 remote Herdr plugin
   -> /tmp/herdr-remote-download-<remote-user>.sock
   -> SSH RemoteForward
   -> 127.0.0.1:18340 on the connected Mac
-  -> ~/Downloads
+  <-> ~/Downloads or macOS file picker
+  <-> focused remote pane cwd
 ```
 
 传输使用一个随机的 64 字符令牌进行认证，并在接收后通过 SHA-256 校验。
@@ -31,14 +33,14 @@ remote Herdr plugin
 
 - Herdr 0.7.0 或更高版本
 - 连接端：macOS、Git、Rust/Cargo 1.88 或更高版本
-- 远程主机：Linux 或 macOS、Git、Rust/Cargo 1.88 或更高版本
+- 远程主机：Linux 或 macOS、Git、Rust/Cargo 1.88 或更高版本、Python 3.9 或更高版本
 - 已在 SSH config 中定义的远程主机
 
 ## 安装设置
 
 以下示例使用 `your-server` 作为现有的 SSH 主机名。
 
-### 1. Mac 端接收服务
+### 1. Mac 端传输服务
 
 在 Mac 上克隆仓库并安装 launchd 服务。
 
@@ -51,7 +53,7 @@ cargo build --release --locked
 curl -fsS http://127.0.0.1:18340/health
 ```
 
-接收服务仅绑定到 `127.0.0.1`，日志写入
+传输服务仅绑定到 `127.0.0.1`，日志写入
 `~/Library/Logs/herdr-remote-download.log`。认证令牌会创建在
 `~/.config/herdr-remote-download/token`。
 
@@ -87,6 +89,7 @@ herdr plugin install kosuketut/herdr-remotedownloder
 ```
 
 确认安装内容后，安装程序会根据插件清单构建两个 Rust 二进制文件。
+上传客户端无需额外构建。
 
 ### 4. 将认证令牌复制到远程主机
 
@@ -113,6 +116,12 @@ key = "prefix+d"
 type = "plugin_action"
 command = "kosukeyano.remote-download.pick"
 description = "pick a remote file to download"
+
+[[keys.command]]
+key = "prefix+u"
+type = "plugin_action"
+command = "kosukeyano.remote-download.upload"
+description = "upload a file from the connected Mac"
 ```
 
 重新加载配置：
@@ -182,11 +191,21 @@ herdr plugin action invoke kosukeyano.remote-download.pick
 选择一个文件路径，然后直接调用
 `kosukeyano.remote-download.download` action。
 
+### 从 Mac 上传到远程主机
+
+聚焦目标 pane 后按 `prefix+u`。在 Mac 对话框中选择一个常规文件，插件会将其
+保存到该 pane 的当前工作目录，并在 overlay 中显示保存路径。按 Enter 关闭。
+
+```sh
+herdr plugin action invoke kosukeyano.remote-download.upload
+```
+
 ## 限制
 
 - 不能直接传输目录。请先将目录打包。
+- 从 Mac 上传时，每次可选择一个常规文件。
 - 默认情况下会拒绝大于 512 MiB 的文件。
-- 仅 macOS 支持通过 launchd 自动启动接收服务。
+- 仅 macOS 支持通过 launchd 自动启动传输服务。
 - 每台远程主机都需要单独配置 SSH `RemoteForward`和认证令牌。
 
 ## 故障排除
@@ -203,6 +222,8 @@ herdr plugin action invoke kosukeyano.remote-download.pick
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 cargo build --release --locked
+python3 -m unittest discover -s tests -v
+python3 -m py_compile herdr_remote_upload.py
 ```
 
 文件选择器界面和提示字符分配使用

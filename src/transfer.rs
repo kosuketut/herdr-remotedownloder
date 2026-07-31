@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
@@ -22,10 +22,13 @@ pub const DEFAULT_MAX_BYTES: u64 = 512 * 1024 * 1024;
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 300;
 pub const PREFLIGHT_TIMEOUT_SECONDS: u64 = 3;
 pub const TRANSFER_PATH: &str = "/v1/files";
+pub const CHOOSE_FILE_PATH: &str = "/v1/choose-file";
 pub const LAUNCHD_LABEL: &str = "com.kosukeyano.herdr-remote-download";
 pub const DOWNLOAD_ACTION: &str = "kosukeyano.remote-download.download";
 pub const PICK_ACTION: &str = "kosukeyano.remote-download.pick";
 pub const PICK_DESCRIPTION: &str = "pick a remote file to download";
+pub const UPLOAD_ACTION: &str = "kosukeyano.remote-download.upload";
+pub const UPLOAD_DESCRIPTION: &str = "upload a file from the connected Mac";
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -581,8 +584,16 @@ impl DownloadServer {
         Ok(())
     }
 
-    fn handle_stream<S: Read + Write>(&self, mut stream: S) {
-        if let Err(error) = self.process_stream(&mut stream) {
+    fn handle_stream<S: Read + Write>(&self, stream: S) {
+        self.handle_stream_with_picker(stream, choose_file_on_mac);
+    }
+
+    fn handle_stream_with_picker<S, F>(&self, mut stream: S, picker: F)
+    where
+        S: Read + Write,
+        F: FnOnce() -> Result<PathBuf>,
+    {
+        if let Err(error) = self.process_stream_with_picker(&mut stream, picker) {
             let _ = write_json_response(
                 &mut stream,
                 400,
@@ -592,7 +603,11 @@ impl DownloadServer {
         }
     }
 
-    fn process_stream<S: Read + Write>(&self, stream: &mut S) -> Result<()> {
+    fn process_stream_with_picker<S, F>(&self, stream: &mut S, picker: F) -> Result<()>
+    where
+        S: Read + Write,
+        F: FnOnce() -> Result<PathBuf>,
+    {
         let mut reader = BufReader::new(stream);
         let mut request_line = String::new();
         read_limited_line(&mut reader, &mut request_line, MAX_HEADER_BYTES)?;
@@ -613,9 +628,11 @@ impl DownloadServer {
                     "service": "herdr-remote-download",
                     "status": "ok",
                     "destination": self.config.destination.to_string_lossy(),
+                    "capabilities": ["download", "upload"],
                 }),
             ),
             ("POST", TRANSFER_PATH) => self.receive_upload(&mut reader, &headers),
+            ("POST", CHOOSE_FILE_PATH) => self.send_chosen_file(&mut reader, &headers, picker),
             _ => write_json_response(
                 reader.get_mut(),
                 404,
@@ -636,6 +653,7 @@ impl DownloadServer {
             .map(String::as_str)
             .unwrap_or("");
         if !constant_time_eq(expected.as_bytes(), provided.as_bytes()) {
+            discard_bounded_body(reader, headers, self.config.max_bytes);
             return write_json_response(
                 reader.get_mut(),
                 401,
@@ -791,6 +809,131 @@ impl DownloadServer {
             }),
         )
     }
+
+    fn send_chosen_file<S, F>(
+        &self,
+        reader: &mut BufReader<&mut S>,
+        headers: &HashMap<String, String>,
+        picker: F,
+    ) -> Result<()>
+    where
+        S: Read + Write,
+        F: FnOnce() -> Result<PathBuf>,
+    {
+        let expected = format!("Bearer {}", self.config.token);
+        let provided = headers
+            .get("authorization")
+            .map(String::as_str)
+            .unwrap_or("");
+        if !constant_time_eq(expected.as_bytes(), provided.as_bytes()) {
+            return write_json_response(
+                reader.get_mut(),
+                401,
+                "Unauthorized",
+                &json!({"error": "unauthorized"}),
+            );
+        }
+        if headers.get("content-length").map(String::as_str) != Some("0") {
+            return write_json_response(
+                reader.get_mut(),
+                400,
+                "Bad Request",
+                &json!({"error": "Content-Length must be zero"}),
+            );
+        }
+        let selected = picker()?;
+        self.write_file_response(reader.get_mut(), &selected)
+    }
+
+    fn write_file_response<W: Write>(&self, stream: &mut W, path: &Path) -> Result<()> {
+        let mut source =
+            File::open(path).with_context(|| format!("cannot open file {}", path.display()))?;
+        let metadata = source
+            .metadata()
+            .with_context(|| format!("cannot inspect file {}", path.display()))?;
+        if !metadata.is_file() {
+            bail!("selected path is not a regular file: {}", path.display());
+        }
+        if metadata.len() > self.config.max_bytes {
+            bail!(
+                "selected file is larger than the {} byte transfer limit",
+                self.config.max_bytes
+            );
+        }
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("selected filename is not valid UTF-8")?;
+        let filename = clean_filename(filename)?;
+
+        let mut digest = Sha256::new();
+        let mut measured = 0_u64;
+        let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
+        loop {
+            let count = source.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            digest.update(&buffer[..count]);
+            measured += count as u64;
+        }
+        if measured != metadata.len() {
+            bail!("selected file changed while it was being read");
+        }
+        let checksum = bytes_to_hex(&digest.finalize());
+        source.seek(SeekFrom::Start(0))?;
+
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/octet-stream\r\n\
+             Content-Length: {}\r\n\
+             X-Herdr-Filename: {}\r\n\
+             X-Herdr-SHA256: {checksum}\r\n\
+             Connection: close\r\n\r\n",
+            metadata.len(),
+            encode_header_value(&filename)
+        )?;
+        let copied = io::copy(&mut source, stream)?;
+        if copied != metadata.len() {
+            bail!("selected file changed while it was being transferred");
+        }
+        stream.flush()?;
+        Ok(())
+    }
+}
+
+fn choose_file_on_mac() -> Result<PathBuf> {
+    if env::consts::OS != "macos" {
+        bail!("the connected file picker service must run on macOS");
+    }
+    let script = "set selectedFile to choose file with prompt \
+                  \"Select a file to upload to the current Herdr pane\"\n\
+                  return POSIX path of selectedFile";
+    let output = Command::new("/usr/bin/osascript")
+        .args(["-e", script])
+        .output()
+        .context("cannot open the macOS file picker")?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if detail.contains("User canceled") || detail.contains("-128") {
+            bail!("file selection was cancelled");
+        }
+        bail!(
+            "macOS file picker failed: {}",
+            if detail.is_empty() {
+                "unknown error"
+            } else {
+                &detail
+            }
+        );
+    }
+    let value = String::from_utf8(output.stdout).context("file picker returned invalid UTF-8")?;
+    let path = PathBuf::from(value.trim_end_matches(&['\r', '\n'][..]));
+    if !path.is_file() {
+        bail!("selected path is not a regular file: {}", path.display());
+    }
+    Ok(path)
 }
 
 pub fn run_server(config: ServerConfig) -> Result<()> {
@@ -853,6 +996,21 @@ fn write_json_response<W: Write>(
     stream.write_all(&body)?;
     stream.flush()?;
     Ok(())
+}
+
+fn discard_bounded_body<R: Read>(
+    reader: &mut R,
+    headers: &HashMap<String, String>,
+    max_bytes: u64,
+) {
+    let Some(length) = headers
+        .get("content-length")
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|length| *length <= max_bytes)
+    else {
+        return;
+    };
+    let _ = io::copy(&mut reader.take(length), &mut io::sink());
 }
 
 fn create_temporary_file(directory: &Path) -> Result<(File, PathBuf)> {
@@ -1016,7 +1174,7 @@ pub fn launchd_plist(
   <key>KeepAlive</key>
   <true/>
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Interactive</string>
   <key>StandardOutPath</key>
   <string>{log}</string>
   <key>StandardErrorPath</key>
@@ -1219,7 +1377,10 @@ pub fn configure_keybinding(path: &Path, key: &str) -> Result<bool> {
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
+
+    static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
     struct TestDirectory {
         path: PathBuf,
@@ -1227,11 +1388,11 @@ mod tests {
 
     impl TestDirectory {
         fn new() -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let path = env::temp_dir().join(format!("herdr-transfer-test-{unique}"));
+            let unique = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let path = env::temp_dir().join(format!(
+                "herdr-transfer-test-{}-{unique}",
+                std::process::id()
+            ));
             fs::create_dir_all(&path).unwrap();
             Self { path }
         }
@@ -1380,7 +1541,8 @@ mod tests {
         )
         .unwrap_err();
         handle.join().unwrap();
-        assert!(format!("{error:#}").contains("401"));
+        let detail = format!("{error:#}");
+        assert!(detail.contains("401"), "{detail}");
     }
 
     #[test]
@@ -1395,6 +1557,78 @@ mod tests {
         };
         check_receiver(&endpoint, 5).unwrap();
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn chosen_mac_file_is_streamed_with_authentication() {
+        let root = TestDirectory::new();
+        let source = root.path.join("chosen file.txt");
+        fs::write(&source, "chosen on mac").unwrap();
+        let token = "ab".repeat(32);
+        let server = test_server(&root.path, &token);
+        let port = server.local_port().unwrap();
+        let handle = thread::spawn(move || {
+            let (stream, _) = server.listener.accept().unwrap();
+            server.handle_stream_with_picker(stream, move || Ok(source));
+        });
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(
+            stream,
+            "POST {CHOOSE_FILE_PATH} HTTP/1.1\r\n\
+             Authorization: Bearer {token}\r\n\
+             Content-Length: 0\r\n\
+             Connection: close\r\n\r\n"
+        )
+        .unwrap();
+        stream.flush().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut status_line = String::new();
+        read_limited_line(&mut reader, &mut status_line, MAX_HEADER_BYTES).unwrap();
+        let headers = read_headers(&mut reader).unwrap();
+        let length = headers["content-length"].parse::<usize>().unwrap();
+        let mut body = vec![0_u8; length];
+        reader.read_exact(&mut body).unwrap();
+        handle.join().unwrap();
+
+        assert!(status_line.contains("200 OK"));
+        assert_eq!(
+            decode_header_value(&headers["x-herdr-filename"]).unwrap(),
+            "chosen file.txt"
+        );
+        assert_eq!(
+            headers["x-herdr-sha256"],
+            sha256_file(&root.path.join("chosen file.txt")).unwrap()
+        );
+        assert_eq!(body, b"chosen on mac");
+    }
+
+    #[test]
+    fn invalid_upload_token_does_not_open_file_picker() {
+        let root = TestDirectory::new();
+        let server = test_server(&root.path, &"ab".repeat(32));
+        let port = server.local_port().unwrap();
+        let handle = thread::spawn(move || {
+            let (stream, _) = server.listener.accept().unwrap();
+            server.handle_stream_with_picker(stream, || -> Result<PathBuf> {
+                panic!("unauthorized request opened the file picker")
+            });
+        });
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(
+            stream,
+            "POST {CHOOSE_FILE_PATH} HTTP/1.1\r\n\
+             Authorization: Bearer {}\r\n\
+             Content-Length: 0\r\n\
+             Connection: close\r\n\r\n",
+            "cd".repeat(32)
+        )
+        .unwrap();
+        stream.flush().unwrap();
+        let response = read_http_response(&mut stream, MAX_RESPONSE_BYTES).unwrap();
+        handle.join().unwrap();
+        assert_eq!(response.status, 401);
     }
 
     #[test]
@@ -1530,6 +1764,7 @@ mod tests {
         assert!(plist.contains("<string>/tmp/herdr-remote-download</string>"));
         assert!(plist.contains("<string>127.0.0.1</string>"));
         assert!(plist.contains("<string>18340</string>"));
+        assert!(plist.contains("<string>Interactive</string>"));
         assert!(!plist.contains("python"));
     }
 

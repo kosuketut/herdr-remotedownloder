@@ -1,8 +1,8 @@
 id = "kosukeyano.remote-download"
-name = "Remote File Download"
-version = "0.3.0"
+name = "Remote File Transfer"
+version = "0.4.0"
 min_herdr_version = "0.7.0"
-description = "Download a selected remote file to the machine running herdr --remote."
+description = "Transfer files between a remote Herdr pane and the connected Mac."
 platforms = ["linux", "macos"]
 
 [[build]]
@@ -22,6 +22,13 @@ description = "Send the selected file path to the connected machine."
 contexts = ["selection", "pane"]
 command = ["./target/release/herdr-remote-download", "send-context"]
 
+[[actions]]
+id = "upload"
+title = "Upload a file from the connected Mac"
+description = "Open the Mac file picker and save the selected file in the focused pane's current directory."
+contexts = ["pane"]
+command = ["sh", "-c", "exec \"${HERDR_BIN_PATH:-herdr}\" plugin pane open --plugin kosukeyano.remote-download --entrypoint uploader"]
+
 [[link_handlers]]
 id = "file-url"
 title = "Download remote file"
@@ -33,3 +40,9 @@ id = "picker"
 title = "Remote file download"
 placement = "overlay"
 command = ["./target/release/herdr-remote-download-picker"]
+
+[[panes]]
+id = "uploader"
+title = "Upload from Mac"
+placement = "overlay"
+command = ["python3", "./herdr_remote_upload.py", "upload-context", "--interactive"]
