@@ -40,9 +40,38 @@ never overwritten; a duplicate is saved as `name (1).ext`, for example.
 
 ## Setup
 
+### Automatic setup (recommended)
+
+Make sure the existing SSH target works with `ssh your-server`, then run on
+the Mac:
+
+```sh
+git clone https://github.com/kosuketut/herdr-remotedownloder.git
+cd herdr-remotedownloder
+./setup.sh your-server
+```
+
+This one command builds and starts the Mac service, installs the remote plugin,
+copies the authentication token, configures both key bindings, creates the
+forwarding-only SSH host, and installs the `hr` function. Reload the shell and
+connect:
+
+```sh
+source ~/.zshrc
+hr your-server
+```
+
+Run `setup.sh` again with another SSH host to add it. Repeating it for the same
+host does not duplicate the managed settings. Before the first change, the
+script saves `~/.ssh/config` and `~/.zshrc` with a
+`.before-herdr-remote-download.bak` suffix.
+
+### Manual setup
+
+Use the following steps when the automatic setup is not available.
 The examples below use `your-server` as the existing SSH host name.
 
-### 1. Transfer service on the Mac
+#### 1. Transfer service on the Mac
 
 Clone the repository on the Mac and install the launchd service.
 
@@ -59,7 +88,7 @@ The service binds only to `127.0.0.1` and writes logs to
 `~/Library/Logs/herdr-remote-download.log`. Its authentication token is created
 at `~/.config/herdr-remote-download/token`.
 
-### 2. SSH tunnel
+#### 2. SSH tunnel
 
 Add a dedicated Herdr host to `~/.ssh/config` on the Mac. Use a different name
 from the normal SSH host so the forwarding configuration remains isolated.
@@ -72,6 +101,7 @@ Host your-server-herdr
     IdentityFile ~/.ssh/id_ed25519
     IdentitiesOnly yes
     RemoteForward /tmp/herdr-remote-download-your-name.sock 127.0.0.1:18340
+    StreamLocalBindUnlink yes
     ExitOnForwardFailure yes
     ServerAliveInterval 15
     ServerAliveCountMax 3
@@ -84,7 +114,7 @@ on the remote host. The Unix socket prevents old and new SSH sessions from
 sharing the same TCP forwarding port. `ExitOnForwardFailure yes` stops Herdr at
 connection time if the socket cannot be created.
 
-### 3. Install the plugin on the remote host
+#### 3. Install the plugin on the remote host
 
 Run:
 
@@ -95,7 +125,7 @@ herdr plugin install kosuketut/herdr-remotedownloder
 After you confirm the installation, the installer builds both Rust binaries
 according to the plugin manifest. The upload client needs no additional build.
 
-### 4. Copy the authentication token to the remote host
+#### 4. Copy the authentication token to the remote host
 
 Run this on the Mac:
 
@@ -110,7 +140,7 @@ ssh your-server \
 
 Do not add the token to a repository or share it with anyone else.
 
-### 5. Key binding
+#### 5. Key binding
 
 Add the following block to `~/.config/herdr/config.toml` on the remote host:
 
@@ -235,6 +265,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo build --release --locked
 python3 -m unittest discover -s tests -v
 python3 -m py_compile herdr_remote_upload.py
+tests/test_setup.sh
 ```
 
 The picker UI and hint assignment use

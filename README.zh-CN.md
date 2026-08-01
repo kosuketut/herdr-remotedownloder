@@ -38,9 +38,35 @@ remote Herdr plugin
 
 ## 安装设置
 
+### 自动设置（推荐）
+
+先确认现有 SSH 主机可以通过 `ssh your-server`连接，然后在 Mac 上运行：
+
+```sh
+git clone https://github.com/kosuketut/herdr-remotedownloder.git
+cd herdr-remotedownloder
+./setup.sh your-server
+```
+
+这一条命令会构建并启动 Mac 端服务、在远程主机上安装插件、复制认证令牌、
+配置两个快捷键、创建专用 SSH 转发主机，并添加 `hr`函数。完成后重新加载 shell
+并连接：
+
+```sh
+source ~/.zshrc
+hr your-server
+```
+
+添加其他远程主机时，使用相应 SSH 主机名再次运行 `setup.sh`。对同一主机重复
+运行不会产生重复配置。首次修改前，脚本会分别以
+`.before-herdr-remote-download.bak`后缀保存 `~/.ssh/config`和 `~/.zshrc`。
+
+### 手动设置
+
+无法使用自动设置时，请依次执行以下步骤。
 以下示例使用 `your-server` 作为现有的 SSH 主机名。
 
-### 1. Mac 端传输服务
+#### 1. Mac 端传输服务
 
 在 Mac 上克隆仓库并安装 launchd 服务。
 
@@ -57,7 +83,7 @@ curl -fsS http://127.0.0.1:18340/health
 `~/Library/Logs/herdr-remote-download.log`。认证令牌会创建在
 `~/.config/herdr-remote-download/token`。
 
-### 2. SSH 隧道
+#### 2. SSH 隧道
 
 在 Mac 的 `~/.ssh/config` 中添加一个 Herdr 专用主机。请使用与普通 SSH
 主机不同的名称，以隔离端口转发设置。请将此配置块放在 `Host *`之前。
@@ -69,6 +95,7 @@ Host your-server-herdr
     IdentityFile ~/.ssh/id_ed25519
     IdentitiesOnly yes
     RemoteForward /tmp/herdr-remote-download-your-name.sock 127.0.0.1:18340
+    StreamLocalBindUnlink yes
     ExitOnForwardFailure yes
     ServerAliveInterval 15
     ServerAliveCountMax 3
@@ -80,7 +107,7 @@ Host your-server-herdr
 Unix 套接字可以防止新旧 SSH 会话共享同一个 TCP 转发端口。
 如果无法创建套接字，`ExitOnForwardFailure yes`会在连接阶段停止 Herdr。
 
-### 3. 在远程主机上安装插件
+#### 3. 在远程主机上安装插件
 
 运行：
 
@@ -91,7 +118,7 @@ herdr plugin install kosuketut/herdr-remotedownloder
 确认安装内容后，安装程序会根据插件清单构建两个 Rust 二进制文件。
 上传客户端无需额外构建。
 
-### 4. 将认证令牌复制到远程主机
+#### 4. 将认证令牌复制到远程主机
 
 在 Mac 上运行：
 
@@ -106,7 +133,7 @@ ssh your-server \
 
 请勿将令牌添加到仓库，也不要与其他人共享。
 
-### 5. 快捷键
+#### 5. 快捷键
 
 将以下配置添加到远程主机的 `~/.config/herdr/config.toml`：
 
@@ -224,6 +251,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo build --release --locked
 python3 -m unittest discover -s tests -v
 python3 -m py_compile herdr_remote_upload.py
+tests/test_setup.sh
 ```
 
 文件选择器界面和提示字符分配使用

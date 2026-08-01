@@ -39,9 +39,37 @@ remote Herdr plugin
 
 ## セットアップ
 
+### 自動セットアップ（推奨）
+
+既存のSSH接続先が `ssh your-server`で利用できることを確認し、Macで次を
+実行します。
+
+```sh
+git clone https://github.com/kosuketut/herdr-remotedownloder.git
+cd herdr-remotedownloder
+./setup.sh your-server
+```
+
+この1コマンドがMac側サービスのビルドと起動、接続先へのプラグイン導入、
+認証トークンとキーバインドの設定、転送専用SSH Host、`hr`関数の追加まで
+行います。完了後、シェルへ反映して接続します。
+
+```sh
+source ~/.zshrc
+hr your-server
+```
+
+別の接続先を追加するときも、そのSSH Host名を指定して `setup.sh`を再実行します。
+同じ接続先への再実行では設定を重複させません。変更前の `~/.ssh/config`と
+`~/.zshrc`は、それぞれ `.before-herdr-remote-download.bak`付きの名前で
+初回のみ保存します。
+
+### 手動セットアップ
+
+自動セットアップを利用できない場合は、以下を順に実行します。
 以下ではSSH configの接続先名を `your-server` とします。
 
-### 1. Mac側の転送サービス
+#### 1. Mac側の転送サービス
 
 Macでリポジトリを取得し、launchdサービスをインストールします。
 
@@ -58,7 +86,7 @@ curl -fsS http://127.0.0.1:18340/health
 `~/Library/Logs/herdr-remote-download.log`へ書きます。認証トークンは
 `~/.config/herdr-remote-download/token`に作成されます。
 
-### 2. SSHトンネル
+#### 2. SSHトンネル
 
 Macの `~/.ssh/config` にHerdr専用のHostを追加します。通常のSSH接続と
 転送ポートを分離するため、既存のHostとは別名にしてください。このブロックは
@@ -71,6 +99,7 @@ Host your-server-herdr
     IdentityFile ~/.ssh/id_ed25519
     IdentitiesOnly yes
     RemoteForward /tmp/herdr-remote-download-your-name.sock 127.0.0.1:18340
+    StreamLocalBindUnlink yes
     ExitOnForwardFailure yes
     ServerAliveInterval 15
     ServerAliveCountMax 3
@@ -83,7 +112,7 @@ Unixソケットを使うことで、古いSSHセッションと新しいセッ�
 共有する問題を避けます。`ExitOnForwardFailure yes`はソケットを作成できない場合、
 転送不能のままHerdrを起動せず、接続時点でエラーにします。
 
-### 3. 接続先へプラグインをインストール
+#### 3. 接続先へプラグインをインストール
 
 接続先で実行します。
 
@@ -94,7 +123,7 @@ herdr plugin install kosuketut/herdr-remotedownloder
 インストーラーは内容の確認後、マニフェストに従って2つのRustバイナリを
 ビルドします。uploadクライアントに追加ビルドはありません。
 
-### 4. 認証トークンを接続先へコピー
+#### 4. 認証トークンを接続先へコピー
 
 Macで次を実行します。
 
@@ -109,7 +138,7 @@ ssh your-server \
 
 トークンをリポジトリへ追加したり、第三者へ共有したりしないでください。
 
-### 5. キーバインド
+#### 5. キーバインド
 
 接続先の `~/.config/herdr/config.toml`へ次を追加します。
 
@@ -230,6 +259,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo build --release --locked
 python3 -m unittest discover -s tests -v
 python3 -m py_compile herdr_remote_upload.py
+tests/test_setup.sh
 ```
 
 pickerの表示とヒント割当には
