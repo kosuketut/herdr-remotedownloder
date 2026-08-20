@@ -24,8 +24,8 @@ command = ["./target/release/herdr-remote-download", "send-context"]
 
 [[actions]]
 id = "upload"
-title = "Upload a file from the connected Mac"
-description = "Open the Mac file picker and save the selected file in the focused pane's current directory."
+title = "Upload files from the connected Mac"
+description = "Open the Mac file picker and save the selected files in the focused pane's current directory."
 contexts = ["pane"]
 command = ["sh", "-c", "exec \"${HERDR_BIN_PATH:-herdr}\" plugin pane open --plugin kosukeyano.remote-download --entrypoint uploader"]
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Receive a file chosen by the connected Mac service into a remote Herdr pane."""
+"""Receive files chosen by the connected Mac service into a remote Herdr pane."""
 
 from __future__ import annotations
 
@@ -19,9 +19,10 @@ from typing import Any, BinaryIO, Dict, Optional, Tuple
 PLUGIN_ID = "kosukeyano.remote-download"
 UPLOAD_ACTION = f"{PLUGIN_ID}.upload"
 LEGACY_UPLOAD_ACTION = "kosukeyano.remote-upload.choose"
-UPLOAD_DESCRIPTION = "upload a file from the connected Mac"
+UPLOAD_DESCRIPTION = "upload files from the connected Mac"
 DEFAULT_KEY = "prefix+u"
 CHOOSE_FILE_PATH = "/v1/choose-file"
+BATCH_CONTENT_TYPE = "application/x-herdr-file-batch"
 DEFAULT_MAX_BYTES = 512 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 600
 MAX_HEADER_BYTES = 64 * 1024
@@ -129,6 +130,23 @@ def read_http_headers(reader: BinaryIO) -> Tuple[int, Dict[str, str]]:
         headers[name.strip().lower()] = value.strip()
 
 
+def read_part_headers(reader: BinaryIO) -> Tuple[Dict[str, str], int]:
+    headers: Dict[str, str] = {}
+    total = 0
+    while True:
+        line = reader.readline(MAX_HEADER_BYTES + 1)
+        total += len(line)
+        if not line or len(line) > MAX_HEADER_BYTES or total > MAX_HEADER_BYTES:
+            raise UploadError("the Mac service returned invalid batch headers")
+        if line in {b"\r\n", b"\n"}:
+            return headers, total
+        try:
+            name, value = line.decode("utf-8").split(":", 1)
+        except (UnicodeDecodeError, ValueError) as error:
+            raise UploadError("the Mac service returned an invalid batch header") from error
+        headers[name.strip().lower()] = value.strip()
+
+
 def decode_filename(value: Optional[str]) -> str:
     if not value or len(value) > 1024:
         raise UploadError("the Mac service did not provide a valid filename")
@@ -169,12 +187,78 @@ def create_unique_file(directory: Path, name: str) -> Tuple[Path, int]:
     raise UploadError("could not allocate a unique destination filename")
 
 
+def receive_file_body(
+    reader: BinaryIO,
+    destination: Path,
+    headers: Dict[str, str],
+    max_bytes: int,
+    progress: bool = False,
+    file_index: int = 1,
+    file_count: int = 1,
+) -> Path:
+    try:
+        length = int(headers.get("content-length", ""))
+    except ValueError as error:
+        raise UploadError("the Mac service returned an invalid Content-Length") from error
+    if length < 0:
+        raise UploadError("the Mac service returned an invalid Content-Length")
+    if length > max_bytes:
+        raise UploadError(f"the selected file exceeds the {max_bytes} byte limit")
+
+    name = decode_filename(headers.get("x-herdr-filename"))
+    expected_digest = headers.get("x-herdr-sha256", "")
+    if len(expected_digest) != 64 or any(
+        character not in "0123456789abcdef" for character in expected_digest
+    ):
+        raise UploadError("the Mac service returned an invalid SHA-256 digest")
+
+    path, descriptor = create_unique_file(destination, name)
+    digest = hashlib.sha256()
+    remaining = length
+    received = 0
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            if progress:
+                print_progress(name, received, length, file_index, file_count)
+            while remaining:
+                chunk = reader.read(min(COPY_BUFFER_BYTES, remaining))
+                if not chunk:
+                    raise UploadError("the Mac service closed before the file was complete")
+                stream.write(chunk)
+                digest.update(chunk)
+                remaining -= len(chunk)
+                received += len(chunk)
+                if progress:
+                    print_progress(name, received, length, file_index, file_count)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if not hmac.compare_digest(digest.hexdigest(), expected_digest):
+            raise UploadError("SHA-256 verification failed")
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    if progress:
+        print()
+    return path
+
+
+def print_progress(name: str, received: int, length: int, index: int, count: int) -> None:
+    percent = 100 if length == 0 else received * 100 // length
+    mib = 1024 * 1024
+    sys.stdout.write(
+        f"\rReceiving {index}/{count}: {name} {percent:3d}% "
+        f"({received / mib:.1f}/{length / mib:.1f} MiB)\x1b[K"
+    )
+    sys.stdout.flush()
+
+
 def receive_to_directory(
     connection: socket.socket,
     destination: Path,
     token: str,
     max_bytes: int,
-) -> Path:
+    progress: bool = False,
+) -> list[Path]:
     request = (
         f"POST {CHOOSE_FILE_PATH} HTTP/1.1\r\n"
         "Host: localhost\r\n"
@@ -183,6 +267,8 @@ def receive_to_directory(
         "Connection: close\r\n\r\n"
     )
     connection.sendall(request.encode("ascii"))
+    if progress:
+        print("Preparing selected files on Mac...", flush=True)
     with connection.makefile("rb") as reader:
         status, headers = read_http_headers(reader)
         try:
@@ -201,36 +287,46 @@ def receive_to_directory(
                 detail = None
             suffix = f": {detail}" if detail else ""
             raise UploadError(f"the Mac service returned HTTP {status}{suffix}")
-        if length > max_bytes:
-            raise UploadError(f"the selected file exceeds the {max_bytes} byte limit")
 
-        name = decode_filename(headers.get("x-herdr-filename"))
-        expected_digest = headers.get("x-herdr-sha256", "")
-        if len(expected_digest) != 64 or any(
-            character not in "0123456789abcdef" for character in expected_digest
-        ):
-            raise UploadError("the Mac service returned an invalid SHA-256 digest")
+        if headers.get("content-type") != BATCH_CONTENT_TYPE:
+            return [
+                receive_file_body(
+                    reader, destination, headers, max_bytes, progress=progress
+                )
+            ]
 
-        path, descriptor = create_unique_file(destination, name)
-        digest = hashlib.sha256()
-        remaining = length
         try:
-            with os.fdopen(descriptor, "wb") as stream:
-                while remaining:
-                    chunk = reader.read(min(COPY_BUFFER_BYTES, remaining))
-                    if not chunk:
-                        raise UploadError("the Mac service closed before the file was complete")
-                    stream.write(chunk)
-                    digest.update(chunk)
-                    remaining -= len(chunk)
-                stream.flush()
-                os.fsync(stream.fileno())
-            if not hmac.compare_digest(digest.hexdigest(), expected_digest):
-                raise UploadError("SHA-256 verification failed")
-        except Exception:
-            path.unlink(missing_ok=True)
-            raise
-        return path
+            count = int(headers.get("x-herdr-file-count", ""))
+        except ValueError as error:
+            raise UploadError("the Mac service returned an invalid file count") from error
+        if count < 2:
+            raise UploadError("the Mac service returned an invalid file count")
+
+        paths = []
+        remaining = length
+        for index in range(count):
+            part_headers, header_bytes = read_part_headers(reader)
+            try:
+                part_length = int(part_headers.get("content-length", ""))
+            except ValueError as error:
+                raise UploadError("the Mac service returned an invalid Content-Length") from error
+            if part_length < 0 or header_bytes + part_length > remaining:
+                raise UploadError("the Mac service returned an invalid batch length")
+            paths.append(
+                receive_file_body(
+                    reader,
+                    destination,
+                    part_headers,
+                    max_bytes,
+                    progress=progress,
+                    file_index=index + 1,
+                    file_count=count,
+                )
+            )
+            remaining -= header_bytes + part_length
+        if remaining != 0:
+            raise UploadError("the Mac service returned trailing batch data")
+        return paths
 
 
 def receive_file(
@@ -239,14 +335,17 @@ def receive_file(
     token_path: Path,
     timeout: int,
     max_bytes: int,
-) -> Path:
+    progress: bool = False,
+) -> list[Path]:
     token = read_token(token_path)
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         connection.settimeout(3)
         connection.connect(str(socket_path))
         connection.settimeout(timeout)
-        return receive_to_directory(connection, destination, token, max_bytes)
+        return receive_to_directory(
+            connection, destination, token, max_bytes, progress=progress
+        )
     except OSError as error:
         raise UploadError(
             f"cannot use the Mac transfer tunnel at {socket_path}: {error}; reconnect hr"
@@ -307,7 +406,7 @@ def wait_for_close() -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Upload a file chosen on the connected Mac to a remote Herdr pane"
+        description="Upload files chosen on the connected Mac to a remote Herdr pane"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command, help_text in (
@@ -340,25 +439,28 @@ def run(arguments: Optional[list[str]] = None) -> int:
 
     interactive = args.interactive
     if interactive:
-        print("Choose a file in the dialog on your Mac.")
-        print("The selected file will be saved in the focused pane's current directory.")
+        print("Choose one or more files in the dialog on your Mac.")
+        print("The selected files will be saved in the focused pane's current directory.")
     destination = (
         destination_from_context() if args.command == "upload-context" else args.destination
     )
     try:
-        path = receive_file(
+        paths = receive_file(
             destination.expanduser(),
             args.socket,
             args.token_file.expanduser(),
             args.timeout,
             bytes_from_megabytes(args.max_mb),
+            progress=interactive,
         )
     except Exception:
         if interactive:
             print("\nUpload failed.", file=sys.stderr)
             wait_for_close()
         raise
-    print(f"\nSaved: {path}")
+    print("\nSaved:")
+    for path in paths:
+        print(path)
     if interactive:
         wait_for_close()
     return 0

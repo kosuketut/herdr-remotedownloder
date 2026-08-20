@@ -8,8 +8,8 @@ A Herdr plugin that transfers files in both directions between a
 Select visible file paths with hint characters, or transfer files from
 `file://` links displayed by Codex, Claude, and other tools. It supports regular
 files of any extension, including PDFs, PPTX files, images, and archives. In
-the other direction, choose a Mac file and save it to the focused remote pane's
-current directory.
+the other direction, choose one or more Mac files and save them to the focused
+remote pane's current directory.
 
 ## How it works
 
@@ -155,7 +155,7 @@ description = "pick a remote file to download"
 key = "prefix+u"
 type = "plugin_action"
 command = "kosukeyano.remote-download.upload"
-description = "upload a file from the connected Mac"
+description = "upload files from the connected Mac"
 ```
 
 Reload the configuration:
@@ -232,9 +232,11 @@ Select a file path and invoke the
 
 ### Upload from the Mac
 
-Focus the destination pane and press `prefix+u`. Choose one regular file in
-the Mac dialog. The plugin saves it in that pane's current directory and shows
-the saved path in an overlay. Press Enter to close it.
+Focus the destination pane and press `prefix+u`. Choose one or more regular
+files in the Mac dialog using Command or Shift. The plugin saves them in that
+pane's current directory. The overlay shows the current file number, filename,
+percentage, and received bytes during transfer, then the saved paths. Press
+Enter to close it.
 
 ```sh
 herdr plugin action invoke kosukeyano.remote-download.upload
@@ -243,8 +245,7 @@ herdr plugin action invoke kosukeyano.remote-download.upload
 ## Limitations
 
 - Directories cannot be transferred. Archive a directory first.
-- Mac-to-remote upload accepts one regular file per invocation.
-- Files larger than 512 MiB are rejected by default.
+- Files larger than 512 MiB each are rejected by default.
 - Automatic transfer-service startup through launchd is supported only on macOS.
 - The SSH `RemoteForward` and authentication token must be configured for each remote host.
 

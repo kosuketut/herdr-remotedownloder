@@ -28,11 +28,12 @@ pub const DOWNLOAD_ACTION: &str = "kosukeyano.remote-download.download";
 pub const PICK_ACTION: &str = "kosukeyano.remote-download.pick";
 pub const PICK_DESCRIPTION: &str = "pick a remote file to download";
 pub const UPLOAD_ACTION: &str = "kosukeyano.remote-download.upload";
-pub const UPLOAD_DESCRIPTION: &str = "upload a file from the connected Mac";
+pub const UPLOAD_DESCRIPTION: &str = "upload files from the connected Mac";
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
+const BATCH_CONTENT_TYPE: &str = "application/x-herdr-file-batch";
 
 #[derive(Clone, Debug)]
 pub enum ReceiverEndpoint {
@@ -591,7 +592,7 @@ impl DownloadServer {
     fn handle_stream_with_picker<S, F>(&self, mut stream: S, picker: F)
     where
         S: Read + Write,
-        F: FnOnce() -> Result<PathBuf>,
+        F: FnOnce() -> Result<Vec<PathBuf>>,
     {
         if let Err(error) = self.process_stream_with_picker(&mut stream, picker) {
             let _ = write_json_response(
@@ -606,7 +607,7 @@ impl DownloadServer {
     fn process_stream_with_picker<S, F>(&self, stream: &mut S, picker: F) -> Result<()>
     where
         S: Read + Write,
-        F: FnOnce() -> Result<PathBuf>,
+        F: FnOnce() -> Result<Vec<PathBuf>>,
     {
         let mut reader = BufReader::new(stream);
         let mut request_line = String::new();
@@ -818,7 +819,7 @@ impl DownloadServer {
     ) -> Result<()>
     where
         S: Read + Write,
-        F: FnOnce() -> Result<PathBuf>,
+        F: FnOnce() -> Result<Vec<PathBuf>>,
     {
         let expected = format!("Bearer {}", self.config.token);
         let provided = headers
@@ -842,10 +843,70 @@ impl DownloadServer {
             );
         }
         let selected = picker()?;
-        self.write_file_response(reader.get_mut(), &selected)
+        match selected.as_slice() {
+            [] => bail!("select at least one file"),
+            [path] => self.write_file_response(reader.get_mut(), path),
+            paths => self.write_file_batch_response(reader.get_mut(), paths),
+        }
+    }
+
+    fn write_file_batch_response<W: Write>(&self, stream: &mut W, paths: &[PathBuf]) -> Result<()> {
+        let mut files = Vec::with_capacity(paths.len());
+        let mut content_length = 0_u64;
+        for path in paths {
+            let file = self.prepare_file(path)?;
+            let header = format!(
+                "Content-Length: {}\r\n\
+                 X-Herdr-Filename: {}\r\n\
+                 X-Herdr-SHA256: {}\r\n\r\n",
+                file.length,
+                encode_header_value(&file.filename),
+                file.checksum
+            );
+            content_length = content_length
+                .checked_add(header.len() as u64)
+                .and_then(|length| length.checked_add(file.length))
+                .context("selected files are too large to transfer as one batch")?;
+            files.push((file, header));
+        }
+
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: {BATCH_CONTENT_TYPE}\r\n\
+             Content-Length: {content_length}\r\n\
+             X-Herdr-File-Count: {}\r\n\
+             Connection: close\r\n\r\n",
+            files.len()
+        )?;
+        for (mut file, header) in files {
+            stream.write_all(header.as_bytes())?;
+            self.write_file_body(stream, &mut file)?;
+        }
+        stream.flush()?;
+        Ok(())
     }
 
     fn write_file_response<W: Write>(&self, stream: &mut W, path: &Path) -> Result<()> {
+        let mut file = self.prepare_file(path)?;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/octet-stream\r\n\
+             Content-Length: {}\r\n\
+             X-Herdr-Filename: {}\r\n\
+             X-Herdr-SHA256: {}\r\n\
+             Connection: close\r\n\r\n",
+            file.length,
+            encode_header_value(&file.filename),
+            file.checksum
+        )?;
+        self.write_file_body(stream, &mut file)?;
+        stream.flush()?;
+        Ok(())
+    }
+
+    fn prepare_file(&self, path: &Path) -> Result<PreparedFile> {
         let mut source =
             File::open(path).with_context(|| format!("cannot open file {}", path.display()))?;
         let metadata = source
@@ -882,34 +943,43 @@ impl DownloadServer {
         }
         let checksum = bytes_to_hex(&digest.finalize());
         source.seek(SeekFrom::Start(0))?;
+        Ok(PreparedFile {
+            source,
+            filename,
+            length: metadata.len(),
+            checksum,
+        })
+    }
 
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: application/octet-stream\r\n\
-             Content-Length: {}\r\n\
-             X-Herdr-Filename: {}\r\n\
-             X-Herdr-SHA256: {checksum}\r\n\
-             Connection: close\r\n\r\n",
-            metadata.len(),
-            encode_header_value(&filename)
-        )?;
-        let copied = io::copy(&mut source, stream)?;
-        if copied != metadata.len() {
+    fn write_file_body<W: Write>(&self, stream: &mut W, file: &mut PreparedFile) -> Result<()> {
+        let copied = io::copy(&mut file.source, stream)?;
+        if copied != file.length {
             bail!("selected file changed while it was being transferred");
         }
-        stream.flush()?;
         Ok(())
     }
 }
 
-fn choose_file_on_mac() -> Result<PathBuf> {
+struct PreparedFile {
+    source: File,
+    filename: String,
+    length: u64,
+    checksum: String,
+}
+
+fn choose_file_on_mac() -> Result<Vec<PathBuf>> {
     if env::consts::OS != "macos" {
         bail!("the connected file picker service must run on macOS");
     }
-    let script = "set selectedFile to choose file with prompt \
-                  \"Select a file to upload to the current Herdr pane\"\n\
-                  return POSIX path of selectedFile";
+    let script = "set selectedFiles to choose file with prompt \
+                  \"Select files to upload to the current Herdr pane\" \
+                  with multiple selections allowed\n\
+                  set selectedPaths to {}\n\
+                  repeat with selectedFile in selectedFiles\n\
+                      set end of selectedPaths to POSIX path of selectedFile\n\
+                  end repeat\n\
+                  set AppleScript's text item delimiters to ASCII character 0\n\
+                  return selectedPaths as text";
     let output = Command::new("/usr/bin/osascript")
         .args(["-e", script])
         .output()
@@ -928,12 +998,21 @@ fn choose_file_on_mac() -> Result<PathBuf> {
             }
         );
     }
-    let value = String::from_utf8(output.stdout).context("file picker returned invalid UTF-8")?;
-    let path = PathBuf::from(value.trim_end_matches(&['\r', '\n'][..]));
-    if !path.is_file() {
-        bail!("selected path is not a regular file: {}", path.display());
+    let mut value = output.stdout;
+    if value.last() == Some(&b'\n') {
+        value.pop();
     }
-    Ok(path)
+    let value = String::from_utf8(value).context("file picker returned invalid UTF-8")?;
+    value
+        .split('\0')
+        .map(PathBuf::from)
+        .map(|path| {
+            if !path.is_file() {
+                bail!("selected path is not a regular file: {}", path.display());
+            }
+            Ok(path)
+        })
+        .collect()
 }
 
 pub fn run_server(config: ServerConfig) -> Result<()> {
@@ -1569,7 +1648,7 @@ mod tests {
         let port = server.local_port().unwrap();
         let handle = thread::spawn(move || {
             let (stream, _) = server.listener.accept().unwrap();
-            server.handle_stream_with_picker(stream, move || Ok(source));
+            server.handle_stream_with_picker(stream, move || Ok(vec![source]));
         });
 
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -1604,13 +1683,67 @@ mod tests {
     }
 
     #[test]
+    fn chosen_mac_files_are_streamed_as_one_batch() {
+        let root = TestDirectory::new();
+        let first = root.path.join("first file.txt");
+        let second = root.path.join("second.bin");
+        fs::write(&first, "first").unwrap();
+        fs::write(&second, "second").unwrap();
+        let token = "ab".repeat(32);
+        let server = test_server(&root.path, &token);
+        let port = server.local_port().unwrap();
+        let handle = thread::spawn(move || {
+            let (stream, _) = server.listener.accept().unwrap();
+            server.handle_stream_with_picker(stream, move || Ok(vec![first, second]));
+        });
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(
+            stream,
+            "POST {CHOOSE_FILE_PATH} HTTP/1.1\r\n\
+             Authorization: Bearer {token}\r\n\
+             Content-Length: 0\r\n\
+             Connection: close\r\n\r\n"
+        )
+        .unwrap();
+        stream.flush().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut status_line = String::new();
+        read_limited_line(&mut reader, &mut status_line, MAX_HEADER_BYTES).unwrap();
+        let response_headers = read_headers(&mut reader).unwrap();
+
+        assert!(status_line.contains("200 OK"));
+        assert_eq!(response_headers["content-type"], BATCH_CONTENT_TYPE);
+        assert_eq!(response_headers["x-herdr-file-count"], "2");
+        for (expected_name, expected_body) in [
+            ("first file.txt", b"first".as_slice()),
+            ("second.bin", b"second".as_slice()),
+        ] {
+            let headers = read_headers(&mut reader).unwrap();
+            let length = headers["content-length"].parse::<usize>().unwrap();
+            let mut body = vec![0_u8; length];
+            reader.read_exact(&mut body).unwrap();
+            assert_eq!(
+                decode_header_value(&headers["x-herdr-filename"]).unwrap(),
+                expected_name
+            );
+            assert_eq!(
+                headers["x-herdr-sha256"],
+                bytes_to_hex(&Sha256::digest(expected_body))
+            );
+            assert_eq!(body, expected_body);
+        }
+        handle.join().unwrap();
+    }
+
+    #[test]
     fn invalid_upload_token_does_not_open_file_picker() {
         let root = TestDirectory::new();
         let server = test_server(&root.path, &"ab".repeat(32));
         let port = server.local_port().unwrap();
         let handle = thread::spawn(move || {
             let (stream, _) = server.listener.accept().unwrap();
-            server.handle_stream_with_picker(stream, || -> Result<PathBuf> {
+            server.handle_stream_with_picker(stream, || -> Result<Vec<PathBuf>> {
                 panic!("unauthorized request opened the file picker")
             });
         });

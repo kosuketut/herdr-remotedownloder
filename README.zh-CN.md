@@ -7,7 +7,7 @@
 
 您可以通过提示字符选择当前屏幕中显示的文件路径，也可以传输 Codex、Claude
 等工具显示的 `file://` 链接。它支持任何扩展名的常规文件，包括 PDF、PPTX、
-图像和压缩包。反向传输时，可以在 Mac 上选择文件，并将其保存到当前聚焦的
+图像和压缩包。反向传输时，可以在 Mac 上选择一个或多个文件，并将其保存到当前聚焦的
 远程 pane 工作目录。
 
 ## 工作原理
@@ -148,7 +148,7 @@ description = "pick a remote file to download"
 key = "prefix+u"
 type = "plugin_action"
 command = "kosukeyano.remote-download.upload"
-description = "upload a file from the connected Mac"
+description = "upload files from the connected Mac"
 ```
 
 重新加载配置：
@@ -220,8 +220,10 @@ herdr plugin action invoke kosukeyano.remote-download.pick
 
 ### 从 Mac 上传到远程主机
 
-聚焦目标 pane 后按 `prefix+u`。在 Mac 对话框中选择一个常规文件，插件会将其
-保存到该 pane 的当前工作目录，并在 overlay 中显示保存路径。按 Enter 关闭。
+聚焦目标 pane 后按 `prefix+u`。在 Mac 对话框中使用 Command 或 Shift 选择一个或
+多个常规文件，插件会将它们保存到该 pane 的当前工作目录，并在 overlay 中显示
+当前文件序号、文件名、进度百分比和已接收大小，完成后显示保存路径。按 Enter
+关闭。
 
 ```sh
 herdr plugin action invoke kosukeyano.remote-download.upload
@@ -230,8 +232,7 @@ herdr plugin action invoke kosukeyano.remote-download.upload
 ## 限制
 
 - 不能直接传输目录。请先将目录打包。
-- 从 Mac 上传时，每次可选择一个常规文件。
-- 默认情况下会拒绝大于 512 MiB 的文件。
+- 默认情况下会拒绝单个大于 512 MiB 的文件。
 - 仅 macOS 支持通过 launchd 自动启动传输服务。
 - 每台远程主机都需要单独配置 SSH `RemoteForward`和认证令牌。
 

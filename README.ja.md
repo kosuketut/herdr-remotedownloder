@@ -153,7 +153,7 @@ description = "pick a remote file to download"
 key = "prefix+u"
 type = "plugin_action"
 command = "kosukeyano.remote-download.upload"
-description = "upload a file from the connected Mac"
+description = "upload files from the connected Mac"
 ```
 
 設定を反映します。
@@ -229,8 +229,10 @@ CodexやClaudeなどが表示した `file://` リンクをHerdr上でControl+ク
 ### Macからremoteへアップロード
 
 転送先のpaneをフォーカスして `prefix+u`を押します。Macに表示される
-ファイル選択ダイアログで通常ファイルを1つ選ぶと、そのpaneのcwdへ保存します。
-overlayに保存先が表示されたら、Enterで閉じます。
+ファイル選択ダイアログで通常ファイルを1つ以上選ぶと、すべてそのpaneのcwdへ
+保存します。複数選択にはCommandまたはShiftを使います。overlayに保存先が
+表示され、転送中はファイル番号、ファイル名、進捗率、受信量を確認できます。
+完了後にEnterで閉じます。
 
 ```sh
 herdr plugin action invoke kosukeyano.remote-download.upload
@@ -239,8 +241,7 @@ herdr plugin action invoke kosukeyano.remote-download.upload
 ## 制限事項
 
 - ディレクトリは転送できません。アーカイブしてから選択してください。
-- Macからremoteへは1回につき通常ファイル1つを転送します。
-- 既定では512 MiBを超えるファイルを転送できません。
+- 既定では1ファイルあたり512 MiBを超えるファイルを転送できません。
 - launchdによる転送サービスの自動起動はmacOSのみ対応しています。
 - SSH `RemoteForward`と認証トークンの設定は、接続先ごとに必要です。
 

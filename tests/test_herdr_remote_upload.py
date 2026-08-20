@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import io
 import json
 import os
 import socket
@@ -37,6 +38,28 @@ def file_response(name, body, checksum=None):
     ).encode() + body
 
 
+def batch_response(files):
+    parts = []
+    for name, body in files:
+        encoded = base64.urlsafe_b64encode(name.encode()).decode().rstrip("=")
+        parts.append(
+            (
+                f"Content-Length: {len(body)}\r\n"
+                f"X-Herdr-Filename: {encoded}\r\n"
+                f"X-Herdr-SHA256: {hashlib.sha256(body).hexdigest()}\r\n\r\n"
+            ).encode()
+            + body
+        )
+    payload = b"".join(parts)
+    return (
+        "HTTP/1.1 200 OK\r\n"
+        f"Content-Type: {upload.BATCH_CONTENT_TYPE}\r\n"
+        f"Content-Length: {len(payload)}\r\n"
+        f"X-Herdr-File-Count: {len(files)}\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode() + payload
+
+
 class RemoteUploadTests(unittest.TestCase):
     def serve_response(self, connection, response, requests):
         requests.append(read_request(connection))
@@ -56,7 +79,7 @@ class RemoteUploadTests(unittest.TestCase):
             thread.start()
             saved = upload.receive_to_directory(
                 client, destination, TOKEN, upload.DEFAULT_MAX_BYTES
-            )
+            )[0]
             client.close()
             thread.join(timeout=2)
             self.assertEqual(saved.name, "report (1).txt")
@@ -64,6 +87,61 @@ class RemoteUploadTests(unittest.TestCase):
             self.assertEqual((destination / "report.txt").read_text(), "keep")
             self.assertIn(b"POST /v1/choose-file HTTP/1.1", requests[0])
             self.assertIn(f"Authorization: Bearer {TOKEN}".encode(), requests[0])
+
+    def test_upload_receives_multiple_selected_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary)
+            server, client = socket.socketpair()
+            thread = threading.Thread(
+                target=self.serve_response,
+                args=(
+                    server,
+                    batch_response(
+                        [("first.txt", b"first"), ("second.bin", b"second")]
+                    ),
+                    [],
+                ),
+            )
+            thread.start()
+            saved = upload.receive_to_directory(
+                client, destination, TOKEN, upload.DEFAULT_MAX_BYTES
+            )
+            client.close()
+            thread.join(timeout=2)
+            self.assertEqual([path.name for path in saved], ["first.txt", "second.bin"])
+            self.assertEqual(saved[0].read_bytes(), b"first")
+            self.assertEqual(saved[1].read_bytes(), b"second")
+
+    def test_upload_reports_progress_for_each_selected_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary)
+            server, client = socket.socketpair()
+            thread = threading.Thread(
+                target=self.serve_response,
+                args=(
+                    server,
+                    batch_response(
+                        [("first.txt", b"first"), ("second.bin", b"second")]
+                    ),
+                    [],
+                ),
+            )
+            thread.start()
+            output = io.StringIO()
+            with mock.patch("sys.stdout", output):
+                upload.receive_to_directory(
+                    client,
+                    destination,
+                    TOKEN,
+                    upload.DEFAULT_MAX_BYTES,
+                    progress=True,
+                )
+            client.close()
+            thread.join(timeout=2)
+            text = output.getvalue()
+            self.assertIn("Preparing selected files on Mac...", text)
+            self.assertIn("Receiving 1/2: first.txt 100%", text)
+            self.assertIn("Receiving 2/2: second.bin 100%", text)
 
     def test_checksum_failure_removes_partial_file(self):
         with tempfile.TemporaryDirectory() as temporary:
