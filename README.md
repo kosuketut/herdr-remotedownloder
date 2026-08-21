@@ -7,7 +7,8 @@ A Herdr plugin that transfers files in both directions between a
 
 Select visible file paths with hint characters, or transfer files from
 `file://` links displayed by Codex, Claude, and other tools. It supports regular
-files of any extension, including PDFs, PPTX files, images, and archives. In
+files of any extension, including PDFs, PPTX files, images, and archives;
+directories are archived and extracted automatically. In
 the other direction, choose one or more Mac files and save them to the focused
 remote pane's current directory.
 
@@ -244,9 +245,9 @@ herdr plugin action invoke kosukeyano.remote-download.upload
 
 ## Limitations
 
-- Directories cannot be transferred. Archive a directory first.
-- Files larger than 512 MiB each are rejected by default.
-- Automatic transfer-service startup through launchd is supported only on macOS.
+- Directories are archived as `.tar.gz` automatically and extracted into a new folder in the download directory. Symlinks and special files inside the archive are skipped.
+- Files larger than 512 MiB each are rejected by default. Set `HERDR_DOWNLOAD_MAX_MB` on both sides (for example `2048`, or `0` for unlimited), or pass `--max-mb`.
+- Automatic transfer-service startup uses launchd on macOS and a systemd user service on Linux.
 - The SSH `RemoteForward` and authentication token must be configured for each remote host.
 
 ## Troubleshooting

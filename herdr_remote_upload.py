@@ -391,9 +391,24 @@ def configure_upload_keybinding(path: Path, key: str) -> bool:
     return True
 
 
+def default_max_bytes() -> int:
+    """Resolve the size limit from HERDR_DOWNLOAD_MAX_MB (0 = unlimited)."""
+    raw = os.environ.get("HERDR_DOWNLOAD_MAX_MB")
+    if raw is None:
+        return DEFAULT_MAX_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_BYTES
+    if value <= 0:
+        return sys.maxsize
+    return value * 1024 * 1024
+
+
 def bytes_from_megabytes(value: int) -> int:
     if value <= 0:
-        raise UploadError("--max-mb must be greater than zero")
+        # 0 means unlimited.
+        return sys.maxsize
     return value * 1024 * 1024
 
 
@@ -419,7 +434,7 @@ def build_parser() -> argparse.ArgumentParser:
         upload.add_argument("--socket", type=Path, default=default_remote_socket())
         upload.add_argument("--token-file", type=Path, default=plugin_token_path())
         upload.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
-        upload.add_argument("--max-mb", type=int, default=DEFAULT_MAX_BYTES // (1024 * 1024))
+        upload.add_argument("--max-mb", type=int, default=default_max_bytes() // (1024 * 1024))
         upload.add_argument("--interactive", action="store_true")
 
     configure = subparsers.add_parser(

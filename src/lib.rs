@@ -40,7 +40,7 @@ pub fn resolve_existing_file(raw: &str, cwd: &Path) -> Option<PathBuf> {
         } else {
             cwd.join(expanded)
         };
-        if path.is_file() {
+        if path.is_file() || path.is_dir() {
             return Some(path);
         }
     }
@@ -106,7 +106,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_only_regular_files_and_reassigns_hints() {
+    fn keeps_existing_files_and_directories_and_reassigns_hints() {
         let root = TestDirectory::new();
         fs::create_dir(root.path.join("docs")).unwrap();
         fs::write(root.path.join("docs/result.md"), "result").unwrap();
@@ -120,9 +120,11 @@ mod tests {
         );
         filter_existing_file_targets(&mut app, &root.path);
 
-        assert_eq!(app.targets.len(), 1);
+        assert_eq!(app.targets.len(), 2);
         assert_eq!(app.targets[0].target.text, "docs/result.md");
         assert_eq!(app.targets[0].hint, "a");
+        assert_eq!(app.targets[1].target.text, "docs/folder");
+        assert_eq!(app.targets[1].hint, "s");
     }
 
     #[test]

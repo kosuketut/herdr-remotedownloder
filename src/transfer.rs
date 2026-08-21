@@ -12,6 +12,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use regex::Regex;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -286,6 +288,103 @@ fn path_from_file_url(value: &str) -> Result<String> {
     percent_decode(path)
 }
 
+/// Deletes the temporary archive when the transfer ends, success or failure.
+pub struct TemporaryArchive(PathBuf);
+
+impl Drop for TemporaryArchive {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Create a temporary .tar.gz archive of a directory for transfer.
+pub fn archive_directory(path: &Path) -> Result<TemporaryArchive> {
+    let base = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let archive_path = env::temp_dir().join(format!(
+        "herdr-archive-{}-{base}.tar.gz",
+        std::process::id()
+    ));
+    let file = File::create(&archive_path)
+        .with_context(|| format!("cannot create {}", archive_path.display()))?;
+    let encoder = GzEncoder::new(file, Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+    builder.follow_symlinks(false);
+    // Archive the directory contents without the parent-name prefix; the
+    // receiver recreates the name when extracting.
+    builder
+        .append_dir_all(".", path)
+        .with_context(|| format!("cannot archive directory {}", path.display()))?;
+    builder
+        .into_inner()
+        .and_then(|encoder| encoder.finish())
+        .with_context(|| format!("cannot finish archiving {}", path.display()))?;
+    Ok(TemporaryArchive(archive_path))
+}
+
+fn ensure_safe_entry_path(path: &Path) -> Result<()> {
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+    {
+        bail!("archive contains an unsafe path: {}", path.display());
+    }
+    Ok(())
+}
+
+/// Extract a verified .tar.gz into destination under a unique directory named
+/// after the archive.
+pub fn extract_archive(archive_path: &Path, destination: &Path, name: &str) -> Result<PathBuf> {
+    let name = clean_filename(name)?;
+    let mut index = 0_u32;
+    let root = loop {
+        let candidate = if index == 0 {
+            destination.join(&name)
+        } else {
+            destination.join(format!("{name} ({index})"))
+        };
+        match fs::create_dir(&candidate) {
+            Ok(()) => break candidate,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error).context("cannot create extraction directory")
+            }
+        }
+        index += 1;
+        if index >= 10_000 {
+            bail!("could not allocate a unique extraction directory");
+        }
+    };
+    let file = File::open(archive_path)
+        .with_context(|| format!("cannot reopen {}", archive_path.display()))?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    // ponytail: only regular files and directories are restored; symlinks and
+    // special files are skipped. Add link handling if real trees need them.
+    for entry in archive
+        .entries()
+        .context("cannot read archive entries")?
+    {
+        let mut entry = entry.context("cannot read archive entry")?;
+        let entry_path = entry
+            .path()?
+            .to_path_buf();
+        ensure_safe_entry_path(&entry_path)?;
+        match entry.header().entry_type() {
+            tar::EntryType::Regular | tar::EntryType::Directory => {
+                entry
+                    .unpack_in(&root)
+                    .with_context(|| format!("cannot extract {}", entry_path.display()))?;
+            }
+            _ => {}
+        }
+    }
+    Ok(root)
+}
+
 pub fn resolve_path_from_context(context: &Value) -> Result<PathBuf> {
     let raw = context
         .get("clicked_url")
@@ -327,14 +426,14 @@ pub fn resolve_path_from_context(context: &Value) -> Result<PathBuf> {
             base.join(expanded)
         };
         shown = Some(path.clone());
-        if path.is_file() {
+        if path.is_file() || path.is_dir() {
             return path
                 .canonicalize()
-                .with_context(|| format!("cannot resolve file path {}", path.display()));
+                .with_context(|| format!("cannot resolve path {}", path.display()));
         }
     }
     bail!(
-        "file does not exist or is not a regular file: {}",
+        "path does not exist or is not a regular file or directory: {}",
         shown
             .map(|path| path.display().to_string())
             .unwrap_or(candidate)
@@ -479,42 +578,67 @@ pub fn upload_file(
     let token = validate_token(token)?;
     let metadata =
         fs::metadata(path).with_context(|| format!("cannot inspect file {}", path.display()))?;
-    if !metadata.is_file() {
-        bail!("not a regular file: {}", path.display());
-    }
-    if metadata.len() > max_bytes {
+    // Directories are archived to a temporary .tar.gz and extracted by the
+    // receiver; regular files are streamed as-is.
+    let (source_path, filename, _archive_guard) = if metadata.is_dir() {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("directory name is not valid UTF-8")?;
+        let archive = archive_directory(path)?;
+        (
+            archive.0.clone(),
+            format!("{name}.tar.gz"),
+            Some(archive),
+        )
+    } else if metadata.is_file() {
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("filename is not valid UTF-8")?;
+        (path.to_path_buf(), filename.to_string(), None)
+    } else {
+        bail!("not a regular file or directory: {}", path.display());
+    };
+    let length = fs::metadata(&source_path)
+        .with_context(|| format!("cannot inspect file {}", source_path.display()))?
+        .len();
+    if length > max_bytes {
         bail!("file is larger than the {max_bytes} byte transfer limit");
     }
 
     check_receiver(endpoint, timeout_seconds)?;
-    let checksum = sha256_file(path)?;
-    let filename = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("filename is not valid UTF-8")?;
+    let checksum = sha256_file(&source_path)?;
     let timeout = Duration::from_secs(timeout_seconds);
     let display = endpoint.display();
     let mut stream = connect_endpoint(endpoint, timeout)
         .map_err(|error| anyhow!("cannot reach the local receiver through {display}: {error:#}"))?;
-    let header = format!(
+    let mut header = format!(
         "POST {TRANSFER_PATH} HTTP/1.1\r\n\
          Host: localhost\r\n\
          Authorization: Bearer {token}\r\n\
-         Content-Length: {}\r\n\
+         Content-Length: {length}\r\n\
          Content-Type: application/octet-stream\r\n\
-         X-Herdr-Filename: {}\r\n\
-         X-Herdr-SHA256: {checksum}\r\n\
-         Connection: close\r\n\r\n",
-        metadata.len(),
-        encode_header_value(filename)
+         X-Herdr-Filename: {}\r\n",
+        encode_header_value(&filename)
     );
+    if _archive_guard.is_some() {
+        header.push_str("X-Herdr-Extract: 1\r\n");
+    }
+    header.push_str(&format!(
+        "X-Herdr-SHA256: {checksum}\r\n\
+         Connection: close\r\n\r\n"
+    ));
     stream
         .write_all(header.as_bytes())
         .with_context(|| format!("cannot reach the local receiver through {display}"))?;
     let mut source =
-        File::open(path).with_context(|| format!("cannot open file {}", path.display()))?;
-    io::copy(&mut source, &mut stream)
+        File::open(&source_path).with_context(|| format!("cannot open file {}", source_path.display()))?;
+    let sent = io::copy(&mut source, &mut stream)
         .with_context(|| format!("cannot send file through {display}"))?;
+    if sent != length {
+        bail!("file changed while it was being transferred");
+    }
     stream
         .flush()
         .with_context(|| format!("cannot finish sending file through {display}"))?;
@@ -786,7 +910,38 @@ impl DownloadServer {
                 &json!({"error": "SHA-256 mismatch"}),
             );
         }
-        let final_path =
+        let final_path = if headers.contains_key("x-herdr-extract") {
+            let stem = filename
+                .strip_suffix(".tar.gz")
+                .or_else(|| filename.strip_suffix(".tgz"))
+                .unwrap_or(&filename)
+                .to_string();
+            match extract_archive(&temporary_path, &self.config.destination, &stem) {
+                Ok(root) => {
+                    let _ = fs::remove_file(&temporary_path);
+                    return write_json_response(
+                        reader.get_mut(),
+                        201,
+                        "Created",
+                        &json!({
+                            "path": root.to_string_lossy(),
+                            "bytes": length,
+                            "sha256": actual_checksum,
+                            "extracted": true,
+                        }),
+                    );
+                }
+                Err(error) => {
+                    let _ = fs::remove_file(&temporary_path);
+                    return write_json_response(
+                        reader.get_mut(),
+                        500,
+                        "Internal Server Error",
+                        &json!({"error": format!("cannot extract archive: {error:#}")}),
+                    );
+                }
+            }
+        } else {
             match commit_without_overwrite(&temporary_path, &self.config.destination, &filename) {
                 Ok(path) => path,
                 Err(error) => {
@@ -798,7 +953,8 @@ impl DownloadServer {
                         &json!({"error": format!("cannot save file: {error:#}")}),
                     );
                 }
-            };
+            }
+        };
         write_json_response(
             reader.get_mut(),
             201,
@@ -1291,8 +1447,8 @@ pub fn install_service(
     download_dir: &Path,
     port: u16,
 ) -> Result<PathBuf> {
-    if env::consts::OS != "macos" {
-        bail!("launchd installation requires macOS");
+    if env::consts::OS != "macos" && env::consts::OS != "linux" {
+        bail!("service installation requires macOS or Linux");
     }
     ensure_token(token_path)?;
     let source = binary_source
@@ -1301,6 +1457,16 @@ pub fn install_service(
     if !source.is_file() {
         bail!("Rust executable not found: {}", source.display());
     }
+    let installed_binary = install_binary(&source)?;
+
+    fs::create_dir_all(download_dir)?;
+    match env::consts::OS {
+        "macos" => install_launchd_service(&installed_binary, token_path, download_dir, port),
+        _ => install_systemd_service(&installed_binary, token_path, download_dir, port),
+    }
+}
+
+fn install_binary(source: &Path) -> Result<PathBuf> {
     let install_dir = default_data_dir()?;
     fs::create_dir_all(&install_dir)?;
     fs::set_permissions(&install_dir, fs::Permissions::from_mode(0o700))?;
@@ -1309,7 +1475,7 @@ pub fn install_service(
         ".herdr-remote-download-install-{}",
         std::process::id()
     ));
-    fs::copy(&source, &temporary_binary).with_context(|| {
+    fs::copy(source, &temporary_binary).with_context(|| {
         format!(
             "cannot copy {} to {}",
             source.display(),
@@ -1318,8 +1484,76 @@ pub fn install_service(
     })?;
     fs::set_permissions(&temporary_binary, fs::Permissions::from_mode(0o755))?;
     fs::rename(&temporary_binary, &installed_binary)?;
+    Ok(installed_binary)
+}
 
-    fs::create_dir_all(download_dir)?;
+pub fn systemd_unit(
+    binary: &Path,
+    token_path: &Path,
+    download_dir: &Path,
+    port: u16,
+) -> String {
+    format!(
+        r#"[Unit]
+Description=Herdr remote download receiver
+
+[Service]
+ExecStart={binary} serve --host 127.0.0.1 --port {port} --download-dir {dir} --token-file {token}
+Restart=always
+
+[Install]
+WantedBy=default.target
+"#,
+        binary = binary.display(),
+        port = port,
+        dir = download_dir.display(),
+        token = token_path.display(),
+    )
+}
+
+fn install_systemd_service(
+    installed_binary: &Path,
+    token_path: &Path,
+    download_dir: &Path,
+    port: u16,
+) -> Result<PathBuf> {
+    let unit_dir = home_dir()?.join(".config/systemd/user");
+    fs::create_dir_all(&unit_dir).context("cannot create the systemd user unit directory")?;
+    let unit_path = unit_dir.join(format!("{LAUNCHD_LABEL}.service"));
+    let unit = systemd_unit(installed_binary, token_path, download_dir, port);
+    let temporary_unit = unit_path.with_extension(format!("service.tmp-{}", std::process::id()));
+    fs::write(&temporary_unit, unit)?;
+    fs::rename(&temporary_unit, &unit_path)?;
+
+    let reload = Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .output()
+        .context("cannot run systemctl --user daemon-reload")?;
+    if !reload.status.success() {
+        bail!(
+            "systemctl daemon-reload failed: {}",
+            String::from_utf8_lossy(&reload.stderr).trim()
+        );
+    }
+    let enable = Command::new("systemctl")
+        .args(["--user", "enable", "--now", unit_path.file_name().context("unit path has no file name")?.to_string_lossy().as_ref()])
+        .output()
+        .context("cannot run systemctl --user enable")?;
+    if !enable.status.success() {
+        bail!(
+            "systemctl enable failed: {}",
+            String::from_utf8_lossy(&enable.stderr).trim()
+        );
+    }
+    Ok(unit_path)
+}
+
+fn install_launchd_service(
+    installed_binary: &Path,
+    token_path: &Path,
+    download_dir: &Path,
+    port: u16,
+) -> Result<PathBuf> {
     let log_path = home_dir()?.join("Library/Logs/herdr-remote-download.log");
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)?;
@@ -1328,7 +1562,7 @@ pub fn install_service(
     if let Some(parent) = plist_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let plist = launchd_plist(&installed_binary, token_path, download_dir, port, &log_path);
+    let plist = launchd_plist(installed_binary, token_path, download_dir, port, &log_path);
     let temporary_plist = plist_path.with_extension(format!("plist.tmp-{}", std::process::id()));
     fs::write(&temporary_plist, plist)?;
     fs::rename(&temporary_plist, &plist_path)?;
@@ -1363,17 +1597,26 @@ pub fn install_service(
 }
 
 pub fn service_status() -> Result<bool> {
-    if env::consts::OS != "macos" {
-        bail!("launchd status requires macOS");
+    match env::consts::OS {
+        "macos" => {
+            let service = format!("gui/{}/{LAUNCHD_LABEL}", launchd_uid()?);
+            Ok(Command::new("/bin/launchctl")
+                .args(["print", &service])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .context("cannot run launchctl print")?
+                .success())
+        }
+        "linux" => Ok(Command::new("systemctl")
+            .args(["--user", "is-active", "--quiet", &format!("{LAUNCHD_LABEL}.service")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("cannot run systemctl --user is-active")?
+            .success()),
+        _ => bail!("service status requires macOS or Linux"),
     }
-    let service = format!("gui/{}/{LAUNCHD_LABEL}", launchd_uid()?);
-    Ok(Command::new("/bin/launchctl")
-        .args(["print", &service])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("cannot run launchctl print")?
-        .success())
 }
 
 pub fn add_keybinding_config(content: &str, key: &str) -> Result<(String, bool)> {
@@ -1899,6 +2142,84 @@ mod tests {
         assert!(plist.contains("<string>18340</string>"));
         assert!(plist.contains("<string>Interactive</string>"));
         assert!(!plist.contains("python"));
+    }
+
+    #[test]
+    fn systemd_unit_runs_the_rust_binary() {
+        let unit = systemd_unit(
+            Path::new("/home/user/.local/share/herdr-remote-download/herdr-remote-download"),
+            Path::new("/home/user/.config/herdr-remote-download/token"),
+            Path::new("/home/user/Downloads"),
+            DEFAULT_PORT,
+        );
+        assert!(unit.contains("ExecStart=/home/user/.local/share/herdr-remote-download/herdr-remote-download serve --host 127.0.0.1 --port 18340"));
+        assert!(unit.contains("Restart=always"));
+        assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    #[test]
+    fn directory_upload_is_extracted_on_the_receiver() {
+        let root = TestDirectory::new();
+        let source = root.path.join("mydir");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("a.txt"), "alpha").unwrap();
+        fs::write(source.join("nested/b.txt"), "beta").unwrap();
+
+        let token = "ab".repeat(32);
+        let server = test_server(&root.path, &token);
+        let port = server.local_port().unwrap();
+        let handle = thread::spawn(move || server.serve_count(2).unwrap());
+
+        let endpoint = ReceiverEndpoint::Tcp {
+            host: "127.0.0.1".to_string(),
+            port,
+        };
+        let response = upload_file(&source, &endpoint, &token, 30, 1024 * 1024).unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(response["extracted"], true);
+        let extracted = PathBuf::from(response["path"].as_str().unwrap());
+        assert_eq!(extracted.file_name().unwrap(), "mydir");
+        assert_eq!(fs::read_to_string(extracted.join("a.txt")).unwrap(), "alpha");
+        assert_eq!(
+            fs::read_to_string(extracted.join("nested/b.txt")).unwrap(),
+            "beta"
+        );
+    }
+
+    #[test]
+    fn archive_extraction_rejects_unsafe_paths() {
+        assert!(ensure_safe_entry_path(Path::new("ok/nested.txt")).is_ok());
+        assert!(ensure_safe_entry_path(Path::new("/etc/passwd")).is_err());
+        assert!(ensure_safe_entry_path(Path::new("../escape.txt")).is_err());
+        assert!(ensure_safe_entry_path(Path::new("a/../../escape.txt")).is_err());
+    }
+
+    #[test]
+    fn extraction_skips_duplicate_names_and_special_entries() {
+        let root = TestDirectory::new();
+        // Build an archive containing a symlink to make sure it is skipped.
+        let archive_path = root.path.join("special.tar.gz");
+        let file = File::create(&archive_path).unwrap();
+        let encoder = GzEncoder::new(file, Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_link_name("/etc/passwd").unwrap();
+        builder.append_data(&mut header, "danger", io::empty()).unwrap();
+        let mut regular = tar::Header::new_gnu();
+        regular.set_size(5);
+        regular.set_mode(0o644);
+        regular.set_cksum();
+        builder.append_data(&mut regular, "keep.txt", b"bytes" as &[u8]).unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let destination = root.path.join("out");
+        fs::create_dir_all(&destination).unwrap();
+        let extracted = extract_archive(&archive_path, &destination, "special").unwrap();
+        assert!(!extracted.join("danger").exists());
+        assert_eq!(fs::read_to_string(extracted.join("keep.txt")).unwrap(), "bytes");
     }
 
     #[test]

@@ -62,14 +62,19 @@ enum Command {
         #[arg(long)]
         token_file: Option<PathBuf>,
 
-        #[arg(long, default_value_t = default_max_megabytes())]
+        #[arg(
+            long,
+            env = "HERDR_DOWNLOAD_MAX_MB",
+            default_value_t = default_max_megabytes(),
+            help = "Transfer size limit in MiB (0 for unlimited)"
+        )]
         max_mb: u64,
 
         #[arg(long)]
         verbose: bool,
     },
 
-    /// Install and start the macOS launchd receiver.
+    /// Install and start the receiver service (launchd on macOS, systemd on Linux).
     InstallService {
         #[arg(long)]
         binary: Option<PathBuf>,
@@ -84,7 +89,7 @@ enum Command {
         token_file: Option<PathBuf>,
     },
 
-    /// Report whether the macOS launchd receiver is running.
+    /// Report whether the receiver service is running.
     ServiceStatus,
 
     /// Add the default prefix-d keybinding to a Herdr config file.
@@ -108,7 +113,12 @@ struct TransferOptions {
     #[arg(long, env = "HERDR_DOWNLOAD_SOCKET")]
     socket: Option<PathBuf>,
 
-    #[arg(long, default_value_t = default_max_megabytes())]
+    #[arg(
+        long,
+        env = "HERDR_DOWNLOAD_MAX_MB",
+        default_value_t = default_max_megabytes(),
+        help = "Transfer size limit in MiB (0 for unlimited)"
+    )]
     max_mb: u64,
 }
 
@@ -118,7 +128,8 @@ fn default_max_megabytes() -> u64 {
 
 fn bytes_from_megabytes(value: u64) -> Result<u64> {
     if value == 0 {
-        anyhow::bail!("--max-mb must be greater than zero");
+        // 0 means unlimited.
+        return Ok(u64::MAX);
     }
     value
         .checked_mul(1024 * 1024)
@@ -299,7 +310,7 @@ mod tests {
 
     #[test]
     fn max_megabytes_is_checked() {
-        assert!(bytes_from_megabytes(0).is_err());
+        assert_eq!(bytes_from_megabytes(0).unwrap(), u64::MAX);
         assert!(bytes_from_megabytes(u64::MAX).is_err());
         assert_eq!(bytes_from_megabytes(2).unwrap(), 2 * 1024 * 1024);
     }
