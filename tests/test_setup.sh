@@ -144,7 +144,7 @@ grep -F 'export KEEP_THIS_SETTING=1' "$ZSHRC" >/dev/null
 cmp "$TEST_ROOT/original-ssh-config" \
     "$SSH_CONFIG.before-herdr-remote-download.bak"
 cmp "$TEST_ROOT/original-zshrc" "$ZSHRC.before-herdr-remote-download.bak"
-grep -F 'herdr plugin install --yes kosuketut/herdr-remotedownloder' \
+grep -F "herdr plugin install --yes 'kosuketut/herdr-remotedownloder'" \
     "$SETUP_TEST_LOG" >/dev/null
 
 SSH_CHECKSUM=$(cksum "$SSH_CONFIG" "$MANAGED_CONFIG" "$ZSHRC")

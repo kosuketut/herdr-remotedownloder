@@ -285,19 +285,23 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
+# Non-login SSH shells may not source ~/.profile, so restore common tool paths.
+REMOTE_ENV='export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"'
+
 printf '[1/7] Checking the local and remote requirements...\n'
 herdr --version
 ssh -G "$SSH_TARGET" > "$TEMP_DIR/effective-ssh"
-REMOTE_USER=$(ssh "$SSH_TARGET" '
+REMOTE_USER=$(ssh "$SSH_TARGET" "
+    $REMOTE_ENV
     set -eu
     for command_name in cargo git herdr python3; do
-        command -v "$command_name" >/dev/null 2>&1 || {
-            printf "required command not found on the remote host: %s\n" "$command_name" >&2
+        command -v \"\$command_name\" >/dev/null 2>&1 || {
+            printf \"required command not found on the remote host: %s\\n\" \"\$command_name\" >&2
             exit 1
         }
     done
     id -un
-')
+")
 case "$REMOTE_USER" in
     ''|*[!A-Za-z0-9_.-]*) fail "the remote host returned an unsafe user name" ;;
 esac
@@ -311,19 +315,21 @@ curl --fail --silent --show-error --retry 10 --retry-connrefused --retry-delay 1
     --max-time 2 "http://127.0.0.1:${TRANSFER_PORT}/health" >/dev/null
 
 printf '[3/7] Installing the plugin on %s...\n' "$SSH_TARGET"
-ssh "$SSH_TARGET" herdr plugin install --yes "$PLUGIN_REPOSITORY"
+ssh "$SSH_TARGET" "$REMOTE_ENV; herdr plugin install --yes '$PLUGIN_REPOSITORY'"
 
 printf '[4/7] Copying the authentication token...\n'
-ssh "$SSH_TARGET" '
+ssh "$SSH_TARGET" "
+    $REMOTE_ENV
     set -eu
-    config_dir=$(herdr plugin config-dir kosukeyano.remote-download)
-    mkdir -p "$config_dir"
+    config_dir=\$(herdr plugin config-dir kosukeyano.remote-download)
+    mkdir -p "\$config_dir"
     umask 077
-    cat > "$config_dir/token"
-' < "$HOME/.config/herdr-remote-download/token"
+    cat > "\$config_dir/token"
+" < "$HOME/.config/herdr-remote-download/token"
 
 printf '[5/7] Configuring the remote keybindings...\n'
 ssh "$SSH_TARGET" /bin/sh -s -- "$PLUGIN_ID" <<'REMOTE_SETUP'
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 set -eu
 plugin_id=$1
 plugin_root=$(
