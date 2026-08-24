@@ -315,7 +315,7 @@ curl --fail --silent --show-error --retry 10 --retry-connrefused --retry-delay 1
     --max-time 2 "http://127.0.0.1:${TRANSFER_PORT}/health" >/dev/null
 
 printf '[3/7] Installing the plugin on %s...\n' "$SSH_TARGET"
-ssh "$SSH_TARGET" "$REMOTE_ENV; herdr plugin install --yes '$PLUGIN_REPOSITORY'"
+ssh "$SSH_TARGET" "$REMOTE_ENV; herdr plugin install '$PLUGIN_REPOSITORY' --yes"
 
 printf '[4/7] Copying the authentication token...\n'
 ssh "$SSH_TARGET" "
