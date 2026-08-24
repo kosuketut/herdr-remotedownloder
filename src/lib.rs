@@ -9,9 +9,12 @@ pub mod transfer;
 
 pub fn file_matcher() -> Result<Matcher> {
     let enabled_builtin_patterns = vec!["path".to_string()];
+    // Extension is optional so bare directory names (e.g. `ls` output like
+    // `build src`) are offered too; non-existing matches are dropped later by
+    // filter_existing_file_targets.
     let mut filename = PatternSpec::new(
         "filename",
-        r"(?P<match>[.\w@-]+\.[\w@-]+(?::[0-9]+(?::[0-9]+)?)?)",
+        r"(?P<match>[\w@-]+(?:[.][\w@-]+)*(?::[0-9]+(?::[0-9]+)?)?)",
     );
     filename.ignore_line_breaks = false;
     Matcher::with_builtin_patterns(Some(&enabled_builtin_patterns), vec![filename])
@@ -125,6 +128,23 @@ mod tests {
         assert_eq!(app.targets[0].hint, "a");
         assert_eq!(app.targets[1].target.text, "docs/folder");
         assert_eq!(app.targets[1].hint, "s");
+    }
+
+    #[test]
+    fn offers_bare_directory_names_from_ls_output() {
+        let root = TestDirectory::new();
+        fs::create_dir(root.path.join("build")).unwrap();
+
+        let matcher = file_matcher().unwrap();
+        let mut app = App::from_text_with_theme(
+            "build src docs",
+            &matcher,
+            Theme::default(),
+        );
+        filter_existing_file_targets(&mut app, &root.path);
+
+        assert_eq!(app.targets.len(), 1);
+        assert_eq!(app.targets[0].target.text, "build");
     }
 
     #[test]
