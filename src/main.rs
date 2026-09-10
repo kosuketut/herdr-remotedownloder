@@ -1,5 +1,8 @@
+use std::fs::{self, File};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -62,7 +65,18 @@ fn run() -> Result<()> {
 
     if let Outcome::Copy(selected_path) = outcome {
         terminal.draw(|frame| draw_transfer(frame, &app, &selected_path, None))?;
-        if let Err(error) = send_selected_file(&selected_path, &pane_cwd) {
+        if let Err(error) = send_selected_file(&selected_path, &pane_cwd, || {
+            if event::poll(Duration::from_millis(50))? {
+                match event::read()? {
+                    Event::Key(key) => return Ok(is_cancel_key(key)),
+                    Event::Resize(_, _) => {
+                        terminal.draw(|frame| draw_transfer(frame, &app, &selected_path, None))?;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(false)
+        }) {
             let detail = format!("{error:#}");
             loop {
                 terminal.draw(|frame| draw_transfer(frame, &app, &selected_path, Some(&detail)))?;
@@ -101,7 +115,11 @@ fn focused_pane_context() -> Result<(String, PathBuf)> {
     Ok((pane_id.to_string(), PathBuf::from(cwd)))
 }
 
-fn send_selected_file(selected_path: &str, pane_cwd: &Path) -> Result<()> {
+fn send_selected_file(
+    selected_path: &str,
+    pane_cwd: &Path,
+    cancel_requested: impl FnMut() -> Result<bool>,
+) -> Result<()> {
     let plugin_root = std::env::var_os("HERDR_PLUGIN_ROOT")
         .map(PathBuf::from)
         .context("HERDR_PLUGIN_ROOT is not set")?;
@@ -113,19 +131,73 @@ fn send_selected_file(selected_path: &str, pane_cwd: &Path) -> Result<()> {
         "selected_text": selected_path,
         "focused_pane_cwd": pane_cwd,
     });
-    let output = Command::new(sender)
+    // Keep archives and diagnostics together so cancellation also removes them.
+    let temporary = SenderTemporaryDirectory::create()?;
+    let stderr_path = temporary.0.join("stderr");
+    let mut child = Command::new(sender)
         .arg("send-context")
         .env("HERDR_PLUGIN_CONTEXT_JSON", context.to_string())
-        .output()
+        .env("TMPDIR", &temporary.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(File::create(&stderr_path)?)
+        .spawn()
         .context("could not start the remote download sender")?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if detail.is_empty() {
-            bail!("remote download sender exited with {}", output.status);
+    if let Some(status) = wait_for_sender(&mut child, cancel_requested)? {
+        if !status.success() {
+            let detail = fs::read_to_string(stderr_path)?;
+            let detail = detail.trim();
+            if detail.is_empty() {
+                bail!("remote download sender exited with {status}");
+            }
+            bail!("{detail}");
         }
-        bail!("{detail}");
     }
     Ok(())
+}
+
+fn is_cancel_key(key: KeyEvent) -> bool {
+    key.kind != event::KeyEventKind::Release && matches!(key_to_char(key), Some('\u{1b}' | '\u{3}'))
+}
+
+fn wait_for_sender(
+    child: &mut Child,
+    mut cancel_requested: impl FnMut() -> Result<bool>,
+) -> Result<Option<ExitStatus>> {
+    let result = (|| loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if cancel_requested()? {
+            return Ok(None);
+        }
+    })();
+    if !matches!(&result, Ok(Some(_))) {
+        // Reap the sender before removing its temporary files, even on UI errors.
+        let killed = child.kill();
+        let waited = child.wait();
+        killed.context("could not stop the remote download sender")?;
+        waited.context("could not reap the remote download sender")?;
+    }
+    result
+}
+
+struct SenderTemporaryDirectory(PathBuf);
+
+impl SenderTemporaryDirectory {
+    fn create() -> Result<Self> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("herdr-sender-{}-{nonce}", std::process::id()));
+        fs::DirBuilder::new().mode(0o700).create(&path)?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for SenderTemporaryDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 fn draw(frame: &mut Frame<'_>, app: &App) {
@@ -196,7 +268,7 @@ fn draw_transfer(frame: &mut Frame<'_>, app: &App, selected_path: &str, error: O
             Line::from(""),
             Line::from(selected_path.to_string()),
             Line::from(""),
-            Line::from("Please wait. This window closes when the transfer finishes."),
+            Line::from("Esc / Ctrl+C: cancel. This window closes when the transfer finishes."),
         ]
     };
     let line_count = usize::from(area.height.saturating_sub(1));
@@ -215,7 +287,7 @@ fn draw_transfer(frame: &mut Frame<'_>, app: &App, selected_path: &str, error: O
     let message = if error.is_some() {
         " download  failed  esc:close "
     } else {
-        " download  transferring... "
+        " download  transferring...  esc:cancel "
     };
     frame.render_widget(
         Paragraph::new(message).style(app.theme.status_style()),
@@ -262,6 +334,57 @@ mod tests {
     fn visible_width_excludes_the_terminal_right_edge() {
         assert_eq!(visible_wrap_width(118), 117);
         assert_eq!(visible_wrap_width(1), 1);
+    }
+
+    #[test]
+    fn sender_cancellation_stops_and_reaps_the_process() {
+        assert!(is_cancel_key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE
+        )));
+        assert!(is_cancel_key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_cancel_key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE
+        )));
+        assert!(!is_cancel_key(KeyEvent::new_with_kind(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+            event::KeyEventKind::Release,
+        )));
+
+        for ui_error in [false, true] {
+            let temporary = SenderTemporaryDirectory::create().unwrap();
+            let path = temporary.0.clone();
+            fs::write(path.join("partial.tar.gz"), b"partial archive").unwrap();
+            let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+            let result = wait_for_sender(&mut child, || {
+                if ui_error {
+                    bail!("input failed");
+                }
+                Ok(true)
+            });
+            if ui_error {
+                assert!(result.unwrap_err().to_string().contains("input failed"));
+            } else {
+                assert!(result.unwrap().is_none());
+            }
+            assert!(!child.try_wait().unwrap().unwrap().success());
+            drop(temporary);
+            assert!(!path.exists());
+        }
+
+        let mut child = Command::new("sh").args(["-c", "exit 7"]).spawn().unwrap();
+        let status = wait_for_sender(&mut child, || {
+            std::thread::sleep(Duration::from_millis(10));
+            Ok(false)
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(status.code(), Some(7));
     }
 
     #[test]
