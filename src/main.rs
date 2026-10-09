@@ -12,7 +12,7 @@ use herdr_tiny_fingers::herdr_client::SocketClient;
 use herdr_tiny_fingers::theme::Theme;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 use serde_json::{json, Value};
 
@@ -254,7 +254,7 @@ fn draw_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 fn draw_transfer(frame: &mut Frame<'_>, app: &App, selected_path: &str, error: Option<&str>) {
     let area = frame.area();
-    let mut lines = if let Some(detail) = error {
+    let lines = if let Some(detail) = error {
         vec![
             Line::from(Span::styled("Transfer failed.", app.theme.empty_style())),
             Line::from(""),
@@ -271,9 +271,12 @@ fn draw_transfer(frame: &mut Frame<'_>, app: &App, selected_path: &str, error: O
             Line::from("Esc / Ctrl+C: cancel. This window closes when the transfer finishes."),
         ]
     };
-    let line_count = usize::from(area.height.saturating_sub(1));
-    lines.truncate(line_count);
-    frame.render_widget(Paragraph::new(lines), area);
+    // Wrap long paths and errors so the whole message stays readable.
+    let text_area = Rect {
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), text_area);
 
     if area.height == 0 {
         return;
@@ -385,6 +388,26 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(status.code(), Some(7));
+    }
+
+    #[test]
+    fn transfer_error_wraps_to_the_pane_width() {
+        let app = App::from_text_with_theme("", &file_matcher().unwrap(), Theme::default());
+        let backend = ratatui::backend::TestBackend::new(24, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let detail = "local receiver is unavailable through /tmp/test.sock";
+        terminal
+            .draw(|frame| draw_transfer(frame, &app, "/data/file.pptx", Some(detail)))
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("/tmp/test.sock"));
+        assert!(screen.contains("Press Esc or Enter"));
     }
 
     #[test]

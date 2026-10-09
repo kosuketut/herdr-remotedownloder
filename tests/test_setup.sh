@@ -15,6 +15,7 @@ FAKE_BIN="$TEST_ROOT/bin"
 SETUP_TEST_LOG="$TEST_ROOT/commands.log"
 mkdir -p "$TEST_REPOSITORY" "$TEST_HOME/.ssh" "$FAKE_BIN"
 cp "$PROJECT_DIR/setup.sh" "$TEST_REPOSITORY/setup.sh"
+cp "$PROJECT_DIR/herdr_transfer_tunnel.py" "$TEST_REPOSITORY/herdr_transfer_tunnel.py"
 : > "$TEST_REPOSITORY/Cargo.lock"
 
 cat > "$FAKE_BIN/uname" <<'EOF'
@@ -52,6 +53,12 @@ esac
 SERVICE
 chmod +x target/release/herdr-remote-download
 EOF
+
+cat > "$FAKE_BIN/launchctl" <<'EOF'
+#!/bin/sh
+printf 'launchctl %s\n' "$*" >> "$SETUP_TEST_LOG"
+EOF
+chmod +x "$FAKE_BIN/launchctl"
 
 cat > "$FAKE_BIN/curl" <<'EOF'
 #!/bin/sh
@@ -144,7 +151,7 @@ grep -F 'export KEEP_THIS_SETTING=1' "$ZSHRC" >/dev/null
 cmp "$TEST_ROOT/original-ssh-config" \
     "$SSH_CONFIG.before-herdr-remote-download.bak"
 cmp "$TEST_ROOT/original-zshrc" "$ZSHRC.before-herdr-remote-download.bak"
-grep -F "herdr plugin install --yes 'kosuketut/herdr-remotedownloder'" \
+grep -F "herdr plugin install 'kosuketut/herdr-remotedownloder' --yes" \
     "$SETUP_TEST_LOG" >/dev/null
 
 SSH_CHECKSUM=$(cksum "$SSH_CONFIG" "$MANAGED_CONFIG" "$ZSHRC")
@@ -157,6 +164,10 @@ run_setup earth
 [ "$(grep -c '^Host .*\-herdr$' "$MANAGED_CONFIG")" -eq 2 ]
 [ "$(grep -Fxc '# BEGIN herdr-remote-download setup' "$ZSHRC")" -eq 1 ]
 
+[ -f "$TEST_HOME/Library/LaunchAgents/com.kosukeyano.herdr-transfer-tunnel.mercury.plist" ]
+[ -f "$TEST_HOME/Library/LaunchAgents/com.kosukeyano.herdr-transfer-tunnel.earth.plist" ]
+grep -F 'launchctl bootstrap' "$SETUP_TEST_LOG" >/dev/null
+! grep -F 'rm -f /tmp/herdr-remote-download-' "$ZSHRC"
 sh -n "$TEST_REPOSITORY/setup.sh"
 zsh -n "$ZSHRC"
 printf 'setup tests passed\n'

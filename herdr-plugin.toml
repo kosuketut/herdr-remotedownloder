@@ -13,7 +13,7 @@ id = "pick"
 title = "Pick a remote file to download"
 description = "Show hints for existing file paths in the focused pane."
 contexts = ["pane"]
-command = ["sh", "-c", "exec \"${HERDR_BIN_PATH:-herdr}\" plugin pane open --plugin kosukeyano.remote-download --entrypoint picker"]
+command = ["sh", "-c", "herdr_bin=${HERDR_BIN_PATH:-herdr}; [ -x \"$herdr_bin\" ] || herdr_bin=herdr; exec \"$herdr_bin\" plugin pane open --plugin kosukeyano.remote-download --entrypoint picker"]
 
 [[actions]]
 id = "download"
@@ -27,7 +27,7 @@ id = "upload"
 title = "Upload files from the connected Mac"
 description = "Open the Mac file picker and save the selected files in the focused pane's current directory."
 contexts = ["pane"]
-command = ["sh", "-c", "exec \"${HERDR_BIN_PATH:-herdr}\" plugin pane open --plugin kosukeyano.remote-download --entrypoint uploader"]
+command = ["sh", "-c", "herdr_bin=${HERDR_BIN_PATH:-herdr}; [ -x \"$herdr_bin\" ] || herdr_bin=herdr; exec \"$herdr_bin\" plugin pane open --plugin kosukeyano.remote-download --entrypoint uploader"]
 
 [[link_handlers]]
 id = "file-url"

@@ -65,6 +65,38 @@ hr your-server
 `~/.zshrc`は、それぞれ `.before-herdr-remote-download.bak`付きの名前で
 初回のみ保存します。
 
+### `herdr machine add` で接続する場合
+
+`./setup.sh mercury` は転送トンネルをLaunchAgentとして登録します。
+Macへのログイン時に起動し、SSH切断後も自動再接続します。
+接続不能な古いソケットは自動削除しますが、稼働中のトンネルは変更しません。
+SSH認証は非対話で成功する必要があります（必要なら鍵をSSH agentに登録してください）。
+
+```sh
+herdr machine add mercury --label "mercury"
+```
+
+登録済みなら再登録は不要です。接続先は `mercury` のままにしてください。
+更新後の `hr mercury` とも併用できます。既存のセットアップに自動復旧だけ追加する場合は、
+古い手動トンネルを終了し、次を実行します。
+
+```sh
+python3 herdr_transfer_tunnel.py install mercury
+```
+
+旧 `hr` 関数にはソケット削除処理があるため、併用する前に `setup.sh` を再実行し、
+`source ~/.zshrc` で更新してください。
+ログは `~/Library/Logs/com.kosukeyano.herdr-transfer-tunnel.mercury.log` に保存されます。
+
+接続確認は次のコマンドで行えます。
+
+```sh
+ssh mercury 'curl -fsS --max-time 5 --unix-socket /tmp/herdr-remote-download-$(id -un).sock http://localhost/health'
+```
+
+切断の検知は通常約45秒、再試行間隔は最短30秒です。
+稼働中にリモート側のソケットが削除された場合も、約10秒で再接続します。
+
 ### 手動セットアップ
 
 自動セットアップを利用できない場合は、以下を順に実行します。
@@ -251,7 +283,9 @@ herdr plugin action invoke kosukeyano.remote-download.upload
 接続時に `remote port forwarding failed for listen path` と表示された場合は、
 上記の `rm -f`を実行してから再接続してください。
 転送中にSSHトンネルが失われた場合は、ファイル選択後3秒以内にpickerへ失敗理由を
-表示します。EscまたはEnterで閉じ、Herdrを再接続してください。
+表示します。EscまたはEnterで閉じてください。
+LaunchAgentのトンネルを使う場合は約1分後に再試行してください。接続試行はログに
+時刻付きで記録されます。手動セットアップの場合はHerdrを再接続してください。
 
 ## 開発
 

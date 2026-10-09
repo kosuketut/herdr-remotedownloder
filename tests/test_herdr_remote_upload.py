@@ -170,6 +170,31 @@ class RemoteUploadTests(unittest.TestCase):
         ):
             self.assertEqual(upload.destination_from_context(), Path("/tmp/focused"))
 
+    def test_interactive_errors_are_visible_before_close(self):
+        for command, message in (
+            (["upload", "/tmp"], "transfer tunnel unavailable"),
+            (["upload-context"], "HERDR_PLUGIN_CONTEXT_JSON is not set"),
+        ):
+            with self.subTest(command=command):
+                output = io.StringIO()
+                with (
+                    mock.patch.dict(os.environ, {}, clear=True),
+                    mock.patch("sys.stderr", output),
+                    mock.patch("sys.stdout", io.StringIO()),
+                    mock.patch.object(upload, "home_dir", return_value=Path("/tmp")),
+                    mock.patch.object(upload, "remote_user", return_value="test"),
+                    mock.patch.object(
+                        upload, "receive_file", side_effect=upload.UploadError(message)
+                    ),
+                    mock.patch.object(upload, "wait_for_close") as close,
+                ):
+                    close.side_effect = lambda: self.assertIn(
+                        f"Upload failed: {message}", output.getvalue()
+                    )
+                    with self.assertRaises(upload.UploadError):
+                        upload.run(command + ["--interactive"])
+                    close.assert_called_once()
+
     def test_legacy_keybinding_is_migrated_and_idempotent(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "config.toml"

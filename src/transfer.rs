@@ -534,27 +534,19 @@ pub fn check_receiver(endpoint: &ReceiverEndpoint, timeout_seconds: u64) -> Resu
     }
     let timeout = Duration::from_secs(timeout_seconds.min(PREFLIGHT_TIMEOUT_SECONDS));
     let display = endpoint.display();
-    let mut stream = connect_endpoint(endpoint, timeout).map_err(|_| {
+    let unavailable = || {
         anyhow!(
-            "local receiver is unavailable through {display}; reconnect the Herdr remote session \
-             and verify its SSH RemoteForward"
+            "local receiver is unavailable through {display}: the SSH tunnel from the Mac is not \
+             connected. Retry in about a minute while it reconnects (with the manual setup, \
+             reconnect Herdr)"
         )
-    })?;
+    };
+    let mut stream = connect_endpoint(endpoint, timeout).map_err(|_| unavailable())?;
     stream
         .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .and_then(|_| stream.flush())
-        .map_err(|_| {
-            anyhow!(
-                "local receiver is unavailable through {display}; reconnect the Herdr remote \
-                 session and verify its SSH RemoteForward"
-            )
-        })?;
-    let response = read_http_response(stream.as_mut(), 16 * 1024).map_err(|_| {
-        anyhow!(
-            "local receiver is unavailable through {display}; reconnect the Herdr remote session \
-             and verify its SSH RemoteForward"
-        )
-    })?;
+        .map_err(|_| unavailable())?;
+    let response = read_http_response(stream.as_mut(), 16 * 1024).map_err(|_| unavailable())?;
     let payload: Value = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
     if response.status != 200
         || payload.get("service").and_then(Value::as_str) != Some("herdr-remote-download")

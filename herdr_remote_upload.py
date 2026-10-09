@@ -348,7 +348,8 @@ def receive_file(
         )
     except OSError as error:
         raise UploadError(
-            f"cannot use the Mac transfer tunnel at {socket_path}: {error}; reconnect hr"
+            f"cannot use the Mac transfer tunnel at {socket_path}: {error}; "
+            "retry in about a minute while it reconnects (with the manual setup, reconnect hr)"
         ) from error
     finally:
         connection.close()
@@ -456,10 +457,10 @@ def run(arguments: Optional[list[str]] = None) -> int:
     if interactive:
         print("Choose one or more files in the dialog on your Mac.")
         print("The selected files will be saved in the focused pane's current directory.")
-    destination = (
-        destination_from_context() if args.command == "upload-context" else args.destination
-    )
     try:
+        destination = (
+            destination_from_context() if args.command == "upload-context" else args.destination
+        )
         paths = receive_file(
             destination.expanduser(),
             args.socket,
@@ -468,9 +469,9 @@ def run(arguments: Optional[list[str]] = None) -> int:
             bytes_from_megabytes(args.max_mb),
             progress=interactive,
         )
-    except Exception:
+    except Exception as error:
         if interactive:
-            print("\nUpload failed.", file=sys.stderr)
+            print(f"\nUpload failed: {error}", file=sys.stderr, flush=True)
             wait_for_close()
         raise
     print("\nSaved:")

@@ -224,26 +224,8 @@ hr() {
     return
   fi
 
-  local target="$1"
-  shift
-  local managed_config="${HOME}/.ssh/.herdr-remote-download.config"
-  if [[ -f "$managed_config" ]] &&
-      command grep -Fq "# BEGIN herdr-remote-download: ${target}" "$managed_config"; then
-    local remote_user
-    remote_user=$(command ssh -G "$target" 2>/dev/null |
-      command awk '$1 == "user" { print $2; exit }')
-    case "$remote_user" in
-      ""|*[!A-Za-z0-9_.-]*)
-        print -u2 "hr: could not determine a safe remote user for ${target}"
-        return 1
-        ;;
-    esac
-    command ssh "$target" \
-      "rm -f /tmp/herdr-remote-download-${remote_user}.sock" || return
-    command herdr --remote-keybindings server --remote "${target}-herdr" "$@"
-  else
-    command herdr --remote-keybindings server --remote "$target" "$@"
-  fi
+  # The LaunchAgent owns the transfer tunnel, independently of Herdr.
+  command herdr --remote-keybindings server --remote "$@"
 }
 compdef _herdr hr
 # END herdr-remote-download setup
@@ -273,7 +255,7 @@ esac
 HERDR_TARGET="${SSH_TARGET}-herdr"
 
 [ "$(uname -s)" = "Darwin" ] || fail "the automatic setup currently requires macOS"
-for command_name in cargo curl git herdr ssh; do
+for command_name in cargo curl git herdr ssh python3 launchctl; do
     require_command "$command_name"
 done
 [ -f "$SCRIPT_DIR/Cargo.lock" ] || fail "run setup.sh from a complete repository checkout"
@@ -360,6 +342,7 @@ configure_ssh "$SSH_TARGET" "$HERDR_TARGET" "$REMOTE_USER" \
 
 printf '[7/7] Configuring the hr command...\n'
 configure_zsh "$TEMP_DIR"
+python3 "$SCRIPT_DIR/herdr_transfer_tunnel.py" install "$SSH_TARGET"
 
 printf '\nSetup complete. Restart the shell or run:\n\n'
 printf '  source ~/.zshrc\n'

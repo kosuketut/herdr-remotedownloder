@@ -67,6 +67,39 @@ host does not duplicate the managed settings. Before the first change, the
 script saves `~/.ssh/config` and `~/.zshrc` with a
 `.before-herdr-remote-download.bak` suffix.
 
+### Connecting with `herdr machine add`
+
+`./setup.sh mercury` installs a LaunchAgent for the transfer tunnel. It starts
+at Mac login and reconnects after SSH disconnects. Only stale, non-listening
+sockets are removed. SSH authentication must work non-interactively (load your
+key into the SSH agent if needed).
+
+```sh
+herdr machine add mercury --label "mercury"
+```
+
+Skip registration if already registered. Keep the machine target as `mercury`.
+The updated `hr mercury` can coexist with saved-machine connections. To add only
+automatic recovery to an existing setup, stop your old manual tunnel and run:
+
+```sh
+python3 herdr_transfer_tunnel.py install mercury
+```
+
+Old `hr` functions delete the socket: rerun `setup.sh` and `source ~/.zshrc`
+before using them alongside the LaunchAgent.
+Logs: `~/Library/Logs/com.kosukeyano.herdr-transfer-tunnel.mercury.log`.
+
+Check connectivity with:
+
+```sh
+ssh mercury 'curl -fsS --max-time 5 --unix-socket /tmp/herdr-remote-download-$(id -un).sock http://localhost/health'
+```
+
+Dead SSH connections are normally detected in about 45 seconds; launchd retries
+at intervals of at least 30 seconds. If the socket on the remote host is removed
+while the tunnel is running, the tunnel reconnects within about 10 seconds.
+
 ### Manual setup
 
 Use the following steps when the automatic setup is not available.
@@ -256,8 +289,9 @@ If the connection reports `remote port forwarding failed for listen path`, run
 the `rm -f` command shown above and reconnect.
 
 If the SSH tunnel is lost during a transfer, the picker displays the failure
-within three seconds of selecting the file. Press Esc or Enter to close it,
-then reconnect Herdr.
+within three seconds of selecting the file. Press Esc or Enter to close it.
+With the LaunchAgent tunnel, retry after about a minute; each connection attempt
+is timestamped in its log. With the manual setup, reconnect Herdr.
 
 ## Development
 
