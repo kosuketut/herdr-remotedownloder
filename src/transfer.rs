@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::env;
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
@@ -7,6 +8,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -49,6 +51,137 @@ impl ReceiverEndpoint {
             Self::Tcp { host, port } => format!("{host}:{port}"),
             Self::Unix(path) => path.display().to_string(),
         }
+    }
+}
+
+/// A step of sending one file, reported so callers can show progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferProgress {
+    Archiving,
+    Hashing,
+    Sending { sent: u64, total: u64 },
+}
+
+impl TransferProgress {
+    /// Line format used by `send-context --progress` on stdout.
+    pub fn to_line(self) -> String {
+        match self {
+            Self::Archiving => "progress archiving".to_string(),
+            Self::Hashing => "progress hashing".to_string(),
+            Self::Sending { sent, total } => format!("progress sending {sent} {total}"),
+        }
+    }
+
+    pub fn from_line(line: &str) -> Option<Self> {
+        let mut words = line.strip_prefix("progress ")?.split(' ');
+        let progress = match words.next()? {
+            "archiving" => Self::Archiving,
+            "hashing" => Self::Hashing,
+            "sending" => Self::Sending {
+                sent: words.next()?.parse().ok()?,
+                total: words.next()?.parse().ok()?,
+            },
+            _ => return None,
+        };
+        words.next().is_none().then_some(progress)
+    }
+}
+
+/// What the receiver does with a downloaded file once it is saved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum AfterSave {
+    /// Leave the file in the download directory.
+    #[value(name = "none")]
+    Leave,
+    /// Select the file in Finder (open its folder on Linux).
+    #[default]
+    Reveal,
+    /// Open the file with its default app; folders and executable types are revealed instead.
+    Open,
+}
+
+impl AfterSave {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Leave => "none",
+            Self::Reveal => "reveal",
+            Self::Open => "open",
+        }
+    }
+}
+
+// Opening these can run code, so the "open" setting only reveals them.
+const REVEAL_ONLY_EXTENSIONS: &[&str] = &[
+    "app",
+    "applescript",
+    "bash",
+    "command",
+    "configprofile",
+    "csh",
+    "dmg",
+    "fileloc",
+    "inetloc",
+    "jar",
+    "ksh",
+    "mobileconfig",
+    "mpkg",
+    "pkg",
+    "pl",
+    "py",
+    "rb",
+    "scpt",
+    "scptd",
+    "sh",
+    "shortcut",
+    "terminal",
+    "tool",
+    "url",
+    "webloc",
+    "workflow",
+    "zsh",
+];
+
+/// The command that applies `action` to a saved path on `os`, if any.
+pub fn after_save_command(
+    action: AfterSave,
+    path: &Path,
+    is_directory: bool,
+    os: &str,
+) -> Option<Vec<OsString>> {
+    let openable = !is_directory
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                !REVEAL_ONLY_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+            });
+    let open = match action {
+        AfterSave::Leave => return None,
+        AfterSave::Reveal => false,
+        AfterSave::Open => openable,
+    };
+    match (os, open) {
+        ("macos", true) => Some(vec!["/usr/bin/open".into(), path.into()]),
+        ("macos", false) => Some(vec!["/usr/bin/open".into(), "-R".into(), path.into()]),
+        ("linux", true) => Some(vec!["xdg-open".into(), path.into()]),
+        ("linux", false) => Some(vec!["xdg-open".into(), path.parent()?.into()]),
+        _ => None,
+    }
+}
+
+fn run_after_save(action: AfterSave, path: &Path, is_directory: bool) {
+    let Some(command) = after_save_command(action, path, is_directory, env::consts::OS) else {
+        return;
+    };
+    // Reap in the background so a slow opener never delays the next transfer.
+    if let Ok(mut child) = Command::new(&command[0])
+        .args(&command[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        thread::spawn(move || child.wait());
     }
 }
 
@@ -567,6 +700,17 @@ pub fn upload_file(
     timeout_seconds: u64,
     max_bytes: u64,
 ) -> Result<Value> {
+    upload_file_with_progress(path, endpoint, token, timeout_seconds, max_bytes, |_| {})
+}
+
+pub fn upload_file_with_progress(
+    path: &Path,
+    endpoint: &ReceiverEndpoint,
+    token: &str,
+    timeout_seconds: u64,
+    max_bytes: u64,
+    mut progress: impl FnMut(TransferProgress),
+) -> Result<Value> {
     let token = validate_token(token)?;
     let metadata =
         fs::metadata(path).with_context(|| format!("cannot inspect file {}", path.display()))?;
@@ -577,6 +721,7 @@ pub fn upload_file(
             .file_name()
             .and_then(|name| name.to_str())
             .context("directory name is not valid UTF-8")?;
+        progress(TransferProgress::Archiving);
         let archive = archive_directory(path)?;
         (
             archive.0.clone(),
@@ -600,6 +745,7 @@ pub fn upload_file(
     }
 
     check_receiver(endpoint, timeout_seconds)?;
+    progress(TransferProgress::Hashing);
     let checksum = sha256_file(&source_path)?;
     let timeout = Duration::from_secs(timeout_seconds);
     let display = endpoint.display();
@@ -626,8 +772,28 @@ pub fn upload_file(
         .with_context(|| format!("cannot reach the local receiver through {display}"))?;
     let mut source =
         File::open(&source_path).with_context(|| format!("cannot open file {}", source_path.display()))?;
-    let sent = io::copy(&mut source, &mut stream)
-        .with_context(|| format!("cannot send file through {display}"))?;
+    let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
+    let mut sent = 0_u64;
+    progress(TransferProgress::Sending {
+        sent,
+        total: length,
+    });
+    loop {
+        let count = source
+            .read(&mut buffer)
+            .with_context(|| format!("cannot read file {}", source_path.display()))?;
+        if count == 0 {
+            break;
+        }
+        stream
+            .write_all(&buffer[..count])
+            .with_context(|| format!("cannot send file through {display}"))?;
+        sent += count as u64;
+        progress(TransferProgress::Sending {
+            sent,
+            total: length,
+        });
+    }
     if sent != length {
         bail!("file changed while it was being transferred");
     }
@@ -659,6 +825,7 @@ pub struct ServerConfig {
     pub destination: PathBuf,
     pub token: String,
     pub max_bytes: u64,
+    pub after_save: AfterSave,
     pub verbose: bool,
 }
 
@@ -911,7 +1078,7 @@ impl DownloadServer {
             match extract_archive(&temporary_path, &self.config.destination, &stem) {
                 Ok(root) => {
                     let _ = fs::remove_file(&temporary_path);
-                    return write_json_response(
+                    let response = write_json_response(
                         reader.get_mut(),
                         201,
                         "Created",
@@ -922,6 +1089,8 @@ impl DownloadServer {
                             "extracted": true,
                         }),
                     );
+                    run_after_save(self.config.after_save, &root, true);
+                    return response;
                 }
                 Err(error) => {
                     let _ = fs::remove_file(&temporary_path);
@@ -947,7 +1116,7 @@ impl DownloadServer {
                 }
             }
         };
-        write_json_response(
+        let response = write_json_response(
             reader.get_mut(),
             201,
             "Created",
@@ -956,7 +1125,9 @@ impl DownloadServer {
                 "bytes": length,
                 "sha256": actual_checksum,
             }),
-        )
+        );
+        run_after_save(self.config.after_save, &final_path, false);
+        response
     }
 
     fn send_chosen_file<S, F>(
@@ -1366,6 +1537,7 @@ pub fn launchd_plist(
     token_path: &Path,
     download_dir: &Path,
     port: u16,
+    after_save: AfterSave,
     log_path: &Path,
 ) -> String {
     let arguments = [
@@ -1379,6 +1551,8 @@ pub fn launchd_plist(
         download_dir.display().to_string(),
         "--token-file".to_string(),
         token_path.display().to_string(),
+        "--after-save".to_string(),
+        after_save.as_str().to_string(),
     ];
     let argument_xml = arguments
         .iter()
@@ -1438,6 +1612,7 @@ pub fn install_service(
     token_path: &Path,
     download_dir: &Path,
     port: u16,
+    after_save: AfterSave,
 ) -> Result<PathBuf> {
     if env::consts::OS != "macos" && env::consts::OS != "linux" {
         bail!("service installation requires macOS or Linux");
@@ -1453,8 +1628,20 @@ pub fn install_service(
 
     fs::create_dir_all(download_dir)?;
     match env::consts::OS {
-        "macos" => install_launchd_service(&installed_binary, token_path, download_dir, port),
-        _ => install_systemd_service(&installed_binary, token_path, download_dir, port),
+        "macos" => install_launchd_service(
+            &installed_binary,
+            token_path,
+            download_dir,
+            port,
+            after_save,
+        ),
+        _ => install_systemd_service(
+            &installed_binary,
+            token_path,
+            download_dir,
+            port,
+            after_save,
+        ),
     }
 }
 
@@ -1484,13 +1671,14 @@ pub fn systemd_unit(
     token_path: &Path,
     download_dir: &Path,
     port: u16,
+    after_save: AfterSave,
 ) -> String {
     format!(
         r#"[Unit]
 Description=Herdr remote download receiver
 
 [Service]
-ExecStart={binary} serve --host 127.0.0.1 --port {port} --download-dir {dir} --token-file {token}
+ExecStart={binary} serve --host 127.0.0.1 --port {port} --download-dir {dir} --token-file {token} --after-save {after_save}
 Restart=always
 
 [Install]
@@ -1500,6 +1688,7 @@ WantedBy=default.target
         port = port,
         dir = download_dir.display(),
         token = token_path.display(),
+        after_save = after_save.as_str(),
     )
 }
 
@@ -1508,11 +1697,12 @@ fn install_systemd_service(
     token_path: &Path,
     download_dir: &Path,
     port: u16,
+    after_save: AfterSave,
 ) -> Result<PathBuf> {
     let unit_dir = home_dir()?.join(".config/systemd/user");
     fs::create_dir_all(&unit_dir).context("cannot create the systemd user unit directory")?;
     let unit_path = unit_dir.join(format!("{LAUNCHD_LABEL}.service"));
-    let unit = systemd_unit(installed_binary, token_path, download_dir, port);
+    let unit = systemd_unit(installed_binary, token_path, download_dir, port, after_save);
     let temporary_unit = unit_path.with_extension(format!("service.tmp-{}", std::process::id()));
     fs::write(&temporary_unit, unit)?;
     fs::rename(&temporary_unit, &unit_path)?;
@@ -1545,6 +1735,7 @@ fn install_launchd_service(
     token_path: &Path,
     download_dir: &Path,
     port: u16,
+    after_save: AfterSave,
 ) -> Result<PathBuf> {
     let log_path = home_dir()?.join("Library/Logs/herdr-remote-download.log");
     if let Some(parent) = log_path.parent() {
@@ -1554,7 +1745,14 @@ fn install_launchd_service(
     if let Some(parent) = plist_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let plist = launchd_plist(installed_binary, token_path, download_dir, port, &log_path);
+    let plist = launchd_plist(
+        installed_binary,
+        token_path,
+        download_dir,
+        port,
+        after_save,
+        &log_path,
+    );
     let temporary_plist = plist_path.with_extension(format!("plist.tmp-{}", std::process::id()));
     fs::write(&temporary_plist, plist)?;
     fs::rename(&temporary_plist, &plist_path)?;
@@ -1725,6 +1923,7 @@ mod tests {
             destination: root.join("downloads"),
             token: token.to_string(),
             max_bytes: 1024 * 1024,
+            after_save: AfterSave::Leave,
             verbose: false,
         })
         .unwrap()
@@ -2067,6 +2266,113 @@ mod tests {
     }
 
     #[test]
+    fn upload_reports_hashing_then_byte_progress() {
+        let root = TestDirectory::new();
+        let token = "ab".repeat(32);
+        let server = DownloadServer::bind(ServerConfig {
+            max_bytes: 4 * 1024 * 1024,
+            ..test_server(&root.path, &token).config
+        })
+        .unwrap();
+        let port = server.local_port().unwrap();
+        let source = root.path.join("large.bin");
+        let length = COPY_BUFFER_BYTES as u64 + 10;
+        fs::write(&source, vec![7_u8; length as usize]).unwrap();
+        let handle = thread::spawn(move || server.serve_count(2).unwrap());
+
+        let mut events = Vec::new();
+        upload_file_with_progress(
+            &source,
+            &ReceiverEndpoint::Tcp {
+                host: "127.0.0.1".to_string(),
+                port,
+            },
+            &token,
+            5,
+            2 * 1024 * 1024,
+            |progress| events.push(progress),
+        )
+        .unwrap();
+        handle.join().unwrap();
+        assert_eq!(
+            events,
+            [
+                TransferProgress::Hashing,
+                TransferProgress::Sending {
+                    sent: 0,
+                    total: length
+                },
+                TransferProgress::Sending {
+                    sent: COPY_BUFFER_BYTES as u64,
+                    total: length
+                },
+                TransferProgress::Sending {
+                    sent: length,
+                    total: length
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn progress_lines_round_trip() {
+        for progress in [
+            TransferProgress::Archiving,
+            TransferProgress::Hashing,
+            TransferProgress::Sending { sent: 5, total: 9 },
+        ] {
+            assert_eq!(
+                TransferProgress::from_line(&progress.to_line()),
+                Some(progress)
+            );
+        }
+        for line in [
+            "progress sending 5",
+            "progress sending 5 9 1",
+            "{\"path\":\"/x\"}",
+        ] {
+            assert_eq!(TransferProgress::from_line(line), None);
+        }
+    }
+
+    #[test]
+    fn after_save_opens_only_safe_files() {
+        let command = |action, path: &str, is_directory, os| {
+            after_save_command(action, Path::new(path), is_directory, os).map(|command| {
+                command
+                    .iter()
+                    .map(|part| part.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+            })
+        };
+        let reveal = |path: &str| Some(vec!["/usr/bin/open".into(), "-R".into(), path.into()]);
+        assert_eq!(command(AfterSave::Leave, "/d/a.pdf", false, "macos"), None);
+        assert_eq!(
+            command(AfterSave::Reveal, "/d/a.pdf", false, "macos"),
+            reveal("/d/a.pdf")
+        );
+        assert_eq!(
+            command(AfterSave::Open, "/d/a.PPTX", false, "macos"),
+            Some(vec!["/usr/bin/open".into(), "/d/a.PPTX".into()])
+        );
+        for unsafe_path in ["/d/run.command", "/d/x.SH", "/d/Makefile"] {
+            assert_eq!(
+                command(AfterSave::Open, unsafe_path, false, "macos"),
+                reveal(unsafe_path)
+            );
+        }
+        assert_eq!(
+            command(AfterSave::Open, "/d/tool.app", true, "macos"),
+            reveal("/d/tool.app")
+        );
+        assert_eq!(
+            command(AfterSave::Reveal, "/d/a.pdf", false, "linux"),
+            Some(vec!["xdg-open".into(), "/d".into()])
+        );
+        assert_eq!(command(AfterSave::Open, "/d/a.pdf", false, "windows"), None);
+    }
+
+    #[test]
     fn unavailable_receiver_fails_with_forwarding_error() {
         let root = TestDirectory::new();
         let source = root.path.join("large.bin");
@@ -2127,9 +2433,11 @@ mod tests {
             Path::new("/tmp/token"),
             Path::new("/tmp/downloads"),
             DEFAULT_PORT,
+            AfterSave::Open,
             Path::new("/tmp/download.log"),
         );
         assert!(plist.contains("<string>/tmp/herdr-remote-download</string>"));
+        assert!(plist.contains("<string>--after-save</string>\n      <string>open</string>"));
         assert!(plist.contains("<string>127.0.0.1</string>"));
         assert!(plist.contains("<string>18340</string>"));
         assert!(plist.contains("<string>Interactive</string>"));
@@ -2143,8 +2451,10 @@ mod tests {
             Path::new("/home/user/.config/herdr-remote-download/token"),
             Path::new("/home/user/Downloads"),
             DEFAULT_PORT,
+            AfterSave::Reveal,
         );
         assert!(unit.contains("ExecStart=/home/user/.local/share/herdr-remote-download/herdr-remote-download serve --host 127.0.0.1 --port 18340"));
+        assert!(unit.contains("--after-save reveal\n"));
         assert!(unit.contains("Restart=always"));
         assert!(unit.contains("WantedBy=default.target"));
     }

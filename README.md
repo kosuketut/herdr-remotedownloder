@@ -243,6 +243,11 @@ Press `prefix+d` to add hint characters to existing file paths on the visible
 screen. Type a hint to transfer that file to the Mac. Press Esc to close the
 picker.
 
+To transfer several files at once, press Tab, type the hints of each file
+(typing a hint again deselects it), then press Tab or Enter. Files are sent one
+after another. During each transfer the picker shows the file number,
+percentage, and sent bytes.
+
 The picker recognizes absolute paths, paths relative to the pane's current
 working directory, and paths ending in `:line` or `:line:column`. It works with
 any existing file shown on screen, not only files printed by Codex or Claude.
@@ -252,6 +257,20 @@ You can also invoke the action directly:
 ```sh
 herdr plugin action invoke kosukeyano.remote-download.pick
 ```
+
+### After a file arrives on the Mac
+
+By default the Mac selects each downloaded file in Finder. To open files with
+their default app instead, or to do nothing, reinstall the transfer service
+with `--after-save`:
+
+```sh
+./target/release/herdr-remote-download install-service --after-save open   # or reveal, none
+```
+
+`setup.sh` also reads `HERDR_DOWNLOAD_AFTER_SAVE`. Folders and files that can
+run code (such as `.command`, `.sh`, `.app`, or `.pkg`) are only revealed, even
+with `open`.
 
 ### Download from a `file://` link
 

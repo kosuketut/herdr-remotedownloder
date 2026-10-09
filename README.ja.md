@@ -239,6 +239,10 @@ whence -w hr
 `prefix+d`を押すと、表示中にある実在ファイルのパスへヒント文字が付きます。
 ヒント文字を入力すると、そのファイルをMacへ転送します。Escで閉じます。
 
+複数のファイルをまとめて送る場合は、Tabを押してから各ファイルのヒント文字を
+入力し（同じヒントをもう一度入力すると選択を解除）、TabかEnterで送信します。
+ファイルは1つずつ順に送られ、転送中はファイル番号、進捗率、送信量を表示します。
+
 絶対パス、paneのcwdからの相対パス、`:行`、`:行:列`付きのパスを認識します。
 CodexやClaudeの出力に限らず、現在表示されている実在ファイルが対象です。
 
@@ -247,6 +251,20 @@ CodexやClaudeの出力に限らず、現在表示されている実在ファイ
 ```sh
 herdr plugin action invoke kosukeyano.remote-download.pick
 ```
+
+### Macに届いた後の動作
+
+標準では、ダウンロードしたファイルをFinderで選択状態にします。既定のアプリで
+開く場合や何もしない場合は、`--after-save` を付けて転送サービスを
+再インストールします。
+
+```sh
+./target/release/herdr-remote-download install-service --after-save open   # reveal、noneも指定可
+```
+
+`setup.sh` は環境変数 `HERDR_DOWNLOAD_AFTER_SAVE` も読み取ります。フォルダと、
+開くとコードが実行されうるファイル（`.command`、`.sh`、`.app`、`.pkg` など）は、
+`open` を指定してもFinderで選択するだけにします。
 
 ### `file://` リンクからダウンロード
 

@@ -1,11 +1,15 @@
 use std::fs::{self, File};
+use std::io::{BufRead, BufReader};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
+use std::process::{Child, ChildStdout, Command, ExitCode, ExitStatus, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use herdr_remote_download::transfer::{notify_herdr, TransferProgress};
 use herdr_remote_download::{file_matcher, filter_existing_file_targets};
 use herdr_tiny_fingers::app::{App, Outcome};
 use herdr_tiny_fingers::herdr_client::SocketClient;
@@ -51,7 +55,13 @@ fn run() -> Result<()> {
         terminal.draw(|frame| draw(frame, &app))?;
         match event::read()? {
             Event::Key(key) => {
-                if let Some(character) = key_to_char(key) {
+                // Enter also sends a multi selection; Tab toggles the mode.
+                let character = if app.multi_mode && key.code == KeyCode::Enter {
+                    Some('\t')
+                } else {
+                    key_to_char(key)
+                };
+                if let Some(character) = character {
                     match app.handle_char(character) {
                         Outcome::Continue => {}
                         other => break other,
@@ -63,23 +73,48 @@ fn run() -> Result<()> {
         }
     };
 
-    if let Outcome::Copy(selected_path) = outcome {
-        terminal.draw(|frame| draw_transfer(frame, &app, &selected_path, None))?;
-        if let Err(error) = send_selected_file(&selected_path, &pane_cwd, || {
-            if event::poll(Duration::from_millis(50))? {
-                match event::read()? {
-                    Event::Key(key) => return Ok(is_cancel_key(key)),
-                    Event::Resize(_, _) => {
-                        terminal.draw(|frame| draw_transfer(frame, &app, &selected_path, None))?;
+    if let Outcome::Copy(selection) = outcome {
+        let paths = selected_paths(&selection);
+        let mut view = TransferView {
+            paths: &paths,
+            index: 0,
+            progress: None,
+        };
+        let mut saved = Vec::new();
+        let mut failure = None;
+        for (index, path) in paths.iter().enumerate() {
+            view.index = index;
+            view.progress = None;
+            terminal.draw(|frame| draw_transfer(frame, &app, &view, None))?;
+            let result = send_selected_file(path, &pane_cwd, |progress| {
+                if progress.is_some() {
+                    view.progress = progress;
+                    terminal.draw(|frame| draw_transfer(frame, &app, &view, None))?;
+                }
+                if event::poll(Duration::from_millis(50))? {
+                    match event::read()? {
+                        Event::Key(key) => return Ok(is_cancel_key(key)),
+                        Event::Resize(_, _) => {
+                            terminal.draw(|frame| draw_transfer(frame, &app, &view, None))?;
+                        }
+                        _ => {}
                     }
-                    _ => {}
+                }
+                Ok(false)
+            });
+            match result {
+                Ok(Some(saved_path)) => saved.push(saved_path),
+                Ok(None) => break,
+                Err(error) => {
+                    failure = Some(format!("{error:#}"));
+                    break;
                 }
             }
-            Ok(false)
-        }) {
-            let detail = format!("{error:#}");
+        }
+        notify_saved(&saved);
+        if let Some(detail) = failure {
             loop {
-                terminal.draw(|frame| draw_transfer(frame, &app, &selected_path, Some(&detail)))?;
+                terminal.draw(|frame| draw_transfer(frame, &app, &view, Some(&detail)))?;
                 match event::read()? {
                     Event::Key(key) => match key.code {
                         KeyCode::Esc | KeyCode::Enter => break,
@@ -115,11 +150,37 @@ fn focused_pane_context() -> Result<(String, PathBuf)> {
     Ok((pane_id.to_string(), PathBuf::from(cwd)))
 }
 
+/// Split a picker selection into unique paths, keeping the selection order.
+fn selected_paths(selection: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for path in selection
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        if !paths.iter().any(|seen| seen == path) {
+            paths.push(path.to_string());
+        }
+    }
+    paths
+}
+
+fn notify_saved(saved: &[String]) {
+    let body = match saved {
+        [] => return,
+        [path] if !path.is_empty() => format!("Saved {path}"),
+        _ => format!("Saved {} files", saved.len()),
+    };
+    notify_herdr("Herdr download complete", &body, "success");
+}
+
+/// Send one file and return its saved path on the Mac, or None when cancelled.
+/// `on_poll` receives the latest progress and returns true to cancel.
 fn send_selected_file(
     selected_path: &str,
     pane_cwd: &Path,
-    cancel_requested: impl FnMut() -> Result<bool>,
-) -> Result<()> {
+    mut on_poll: impl FnMut(Option<TransferProgress>) -> Result<bool>,
+) -> Result<Option<String>> {
     let plugin_root = std::env::var_os("HERDR_PLUGIN_ROOT")
         .map(PathBuf::from)
         .context("HERDR_PLUGIN_ROOT is not set")?;
@@ -135,25 +196,60 @@ fn send_selected_file(
     let temporary = SenderTemporaryDirectory::create()?;
     let stderr_path = temporary.0.join("stderr");
     let mut child = Command::new(sender)
-        .arg("send-context")
+        .args(["send-context", "--progress", "--no-notify"])
         .env("HERDR_PLUGIN_CONTEXT_JSON", context.to_string())
         .env("TMPDIR", &temporary.0)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(File::create(&stderr_path)?)
         .spawn()
         .context("could not start the remote download sender")?;
-    if let Some(status) = wait_for_sender(&mut child, cancel_requested)? {
-        if !status.success() {
-            let detail = fs::read_to_string(stderr_path)?;
-            let detail = detail.trim();
-            if detail.is_empty() {
-                bail!("remote download sender exited with {status}");
-            }
-            bail!("{detail}");
+    let output = read_lines(child.stdout.take().context("sender output is not piped")?);
+    let mut saved = None;
+    let mut handle_line = |line: String| match TransferProgress::from_line(&line) {
+        Some(progress) => Some(progress),
+        None => {
+            saved = saved_path(&line).or(saved.take());
+            None
         }
+    };
+    let status = wait_for_sender(&mut child, || {
+        let progress = output.try_iter().filter_map(&mut handle_line).last();
+        on_poll(progress)
+    })?;
+    let Some(status) = status else {
+        return Ok(None);
+    };
+    // The sender has exited, so this drains the rest and ends at EOF.
+    output.iter().for_each(|line| {
+        handle_line(line);
+    });
+    if !status.success() {
+        let detail = fs::read_to_string(stderr_path)?;
+        let detail = detail.trim();
+        if detail.is_empty() {
+            bail!("remote download sender exited with {status}");
+        }
+        bail!("{detail}");
     }
-    Ok(())
+    Ok(Some(saved.unwrap_or_default()))
+}
+
+fn read_lines(stdout: ChildStdout) -> mpsc::Receiver<String> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    receiver
+}
+
+fn saved_path(line: &str) -> Option<String> {
+    let response: Value = serde_json::from_str(line).ok()?;
+    Some(response.get("path")?.as_str()?.to_string())
 }
 
 fn is_cancel_key(key: KeyEvent) -> bool {
@@ -230,13 +326,26 @@ fn draw_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
     } else {
         &app.input
     };
+    let (mode, keys) = if app.multi_mode {
+        (
+            format!("multi selected:{}", app.selected_target_count()),
+            "tab/enter:send",
+        )
+    } else {
+        ("single".to_string(), "tab:multi")
+    };
+    let message = app
+        .message
+        .as_deref()
+        .map(|message| format!("{message}  "))
+        .unwrap_or_default();
     let full = format!(
-        " download  files:{}  input:{}  esc:close ",
+        " download  {mode}  files:{}  input:{}  {message}{keys}  esc:close ",
         app.visible_target_count(),
         input
     );
     let compact = format!(
-        " download files:{} input:{} ",
+        " download {mode} files:{} input:{} ",
         app.visible_target_count(),
         input
     );
@@ -252,21 +361,45 @@ fn draw_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
-fn draw_transfer(frame: &mut Frame<'_>, app: &App, selected_path: &str, error: Option<&str>) {
+struct TransferView<'a> {
+    paths: &'a [String],
+    index: usize,
+    progress: Option<TransferProgress>,
+}
+
+fn draw_transfer(frame: &mut Frame<'_>, app: &App, view: &TransferView<'_>, error: Option<&str>) {
     let area = frame.area();
+    let count = view.paths.len();
     let lines = if let Some(detail) = error {
-        vec![
+        let mut lines = vec![
             Line::from(Span::styled("Transfer failed.", app.theme.empty_style())),
             Line::from(""),
             Line::from(detail.to_string()),
-            Line::from(""),
-            Line::from("Press Esc or Enter to close."),
-        ]
+        ];
+        if count > 1 {
+            lines.push(Line::from(""));
+            lines.push(Line::from(format!(
+                "Saved {} of {count} files before this failure; the rest were not sent.",
+                view.index
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from("Press Esc or Enter to close."));
+        lines
     } else {
+        let heading = if count > 1 {
+            format!(
+                "Transferring file {} of {count} to the connected Mac...",
+                view.index + 1
+            )
+        } else {
+            "Transferring to the connected Mac...".to_string()
+        };
         vec![
-            Line::from("Transferring to the connected Mac..."),
+            Line::from(heading),
             Line::from(""),
-            Line::from(selected_path.to_string()),
+            Line::from(view.paths[view.index].clone()),
+            Line::from(progress_text(view.progress, usize::from(area.width))),
             Line::from(""),
             Line::from("Esc / Ctrl+C: cancel. This window closes when the transfer finishes."),
         ]
@@ -298,6 +431,38 @@ fn draw_transfer(frame: &mut Frame<'_>, app: &App, selected_path: &str, error: O
     );
 }
 
+fn progress_text(progress: Option<TransferProgress>, width: usize) -> String {
+    let (sent, total) = match progress {
+        None => return "Connecting...".to_string(),
+        Some(TransferProgress::Archiving) => return "Archiving the directory...".to_string(),
+        Some(TransferProgress::Hashing) => return "Computing the checksum...".to_string(),
+        Some(TransferProgress::Sending { sent, total }) => (sent, total),
+    };
+    let ratio = if total == 0 {
+        1.0
+    } else {
+        sent as f64 / total as f64
+    };
+    let mib = 1024.0 * 1024.0;
+    let summary = format!(
+        "{:3}% ({:.1}/{:.1} MiB)",
+        (ratio * 100.0) as u64,
+        sent as f64 / mib,
+        total as f64 / mib
+    );
+    // Leave room for the brackets and summary; drop the bar on narrow panes.
+    let bar_width = width.saturating_sub(summary.len() + 3).min(30);
+    if bar_width < 5 {
+        return summary;
+    }
+    let filled = ((ratio * bar_width as f64).round() as usize).min(bar_width);
+    format!(
+        "[{}{}] {summary}",
+        "#".repeat(filled),
+        "-".repeat(bar_width - filled)
+    )
+}
+
 fn visible_wrap_width(layout_width: usize) -> usize {
     if layout_width > 1 {
         layout_width - 1
@@ -315,6 +480,7 @@ fn key_to_char(key: KeyEvent) -> Option<char> {
     }
     match key.code {
         KeyCode::Esc => Some('\u{1b}'),
+        KeyCode::Tab => Some('\t'),
         KeyCode::Backspace => Some('\u{7f}'),
         KeyCode::Char(character) => Some(character),
         _ => None,
@@ -396,8 +562,14 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(24, 12);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let detail = "local receiver is unavailable through /tmp/test.sock";
+        let paths = ["/data/file.pptx".to_string()];
+        let view = TransferView {
+            paths: &paths,
+            index: 0,
+            progress: None,
+        };
         terminal
-            .draw(|frame| draw_transfer(frame, &app, "/data/file.pptx", Some(detail)))
+            .draw(|frame| draw_transfer(frame, &app, &view, Some(detail)))
             .unwrap();
         let screen: String = terminal
             .backend()
@@ -411,10 +583,73 @@ mod tests {
     }
 
     #[test]
-    fn tab_is_not_used_for_multi_select() {
+    fn tab_selects_multiple_unique_paths() {
+        let mut app = App::from_text_with_theme(
+            "/tmp/a.txt /tmp/b.txt /tmp/a.txt",
+            &file_matcher().unwrap(),
+            Theme::default(),
+        );
+        let hints = app
+            .targets
+            .iter()
+            .map(|target| target.hint.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(hints.len(), 3);
+        let mut press = |code| {
+            let character = key_to_char(KeyEvent::new(code, KeyModifiers::NONE)).unwrap();
+            app.handle_char(character)
+        };
+        assert_eq!(press(KeyCode::Tab), Outcome::Continue);
+        for hint in &hints {
+            for character in hint.chars() {
+                assert_eq!(press(KeyCode::Char(character)), Outcome::Continue);
+            }
+        }
+        let Outcome::Copy(selection) = press(KeyCode::Tab) else {
+            panic!("multi selection was not sent");
+        };
+        assert_eq!(selected_paths(&selection), ["/tmp/a.txt", "/tmp/b.txt"]);
+    }
+
+    #[test]
+    fn progress_shows_percent_bytes_and_bar() {
+        let sending = Some(TransferProgress::Sending {
+            sent: 3 * 1024 * 1024,
+            total: 4 * 1024 * 1024,
+        });
         assert_eq!(
-            key_to_char(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-            None
+            progress_text(sending, 80),
+            format!("[{}{}]  75% (3.0/4.0 MiB)", "#".repeat(23), "-".repeat(7))
+        );
+        assert_eq!(progress_text(sending, 20), " 75% (3.0/4.0 MiB)");
+        assert_eq!(progress_text(None, 80), "Connecting...");
+        assert_eq!(
+            progress_text(Some(TransferProgress::Sending { sent: 0, total: 0 }), 10),
+            "100% (0.0/0.0 MiB)"
+        );
+    }
+
+    #[test]
+    fn sender_output_reports_progress_and_saved_path() {
+        let script = "printf 'progress hashing\\nprogress sending 2 4\\n{\\\"path\\\":\\\"/Users/me/Downloads/a.txt\\\"}\\n'";
+        let mut child = Command::new("sh")
+            .args(["-c", script])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = read_lines(child.stdout.take().unwrap());
+        child.wait().unwrap();
+        let lines = output.iter().collect::<Vec<_>>();
+        assert_eq!(
+            lines
+                .iter()
+                .filter_map(|line| TransferProgress::from_line(line))
+                .next_back(),
+            Some(TransferProgress::Sending { sent: 2, total: 4 })
+        );
+        assert_eq!(
+            saved_path(&lines[2]).as_deref(),
+            Some("/Users/me/Downloads/a.txt")
         );
     }
 }

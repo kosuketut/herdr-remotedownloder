@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -7,8 +8,8 @@ use herdr_remote_download::transfer::{
     configure_keybinding, context_from_environment, default_download_dir,
     default_herdr_config_path, default_remote_socket_path, default_token_path, ensure_token,
     install_service, notify_herdr, read_token, resolve_path_from_context, run_server,
-    sender_token_path, service_status, upload_file, ReceiverEndpoint, ServerConfig,
-    DEFAULT_MAX_BYTES, DEFAULT_PORT, DEFAULT_TIMEOUT_SECONDS,
+    sender_token_path, service_status, upload_file_with_progress, AfterSave, ReceiverEndpoint,
+    ServerConfig, TransferProgress, DEFAULT_MAX_BYTES, DEFAULT_PORT, DEFAULT_TIMEOUT_SECONDS,
 };
 use serde_json::json;
 
@@ -26,7 +27,18 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Transfer the path selected from the current Herdr screen.
-    SendContext(TransferOptions),
+    SendContext {
+        #[command(flatten)]
+        transfer: TransferOptions,
+
+        /// Print progress lines to stdout before the result.
+        #[arg(long)]
+        progress: bool,
+
+        /// Skip Herdr notifications because the caller reports the result.
+        #[arg(long)]
+        no_notify: bool,
+    },
 
     /// Transfer an explicit path.
     Send {
@@ -70,6 +82,9 @@ enum Command {
         )]
         max_mb: u64,
 
+        #[command(flatten)]
+        after_save: AfterSaveOption,
+
         #[arg(long)]
         verbose: bool,
     },
@@ -87,6 +102,9 @@ enum Command {
 
         #[arg(long)]
         token_file: Option<PathBuf>,
+
+        #[command(flatten)]
+        after_save: AfterSaveOption,
     },
 
     /// Report whether the receiver service is running.
@@ -120,6 +138,13 @@ struct TransferOptions {
         help = "Transfer size limit in MiB (0 for unlimited)"
     )]
     max_mb: u64,
+}
+
+#[derive(Clone, Debug, Args)]
+struct AfterSaveOption {
+    /// What the Mac does with each downloaded file once it is saved.
+    #[arg(long, env = "HERDR_DOWNLOAD_AFTER_SAVE", value_enum, default_value_t)]
+    after_save: AfterSave,
 }
 
 fn default_max_megabytes() -> u64 {
@@ -159,14 +184,16 @@ fn transfer(
     endpoint: ReceiverEndpoint,
     token_file: PathBuf,
     options: &TransferOptions,
+    progress: impl FnMut(TransferProgress),
 ) -> Result<serde_json::Value> {
     let token = read_token(&token_file)?;
-    upload_file(
+    upload_file_with_progress(
         &path,
         &endpoint,
         &token,
         options.timeout,
         bytes_from_megabytes(options.max_mb)?,
+        progress,
     )
     .with_context(|| format!("failed to transfer {}", path.display()))
 }
@@ -175,7 +202,11 @@ fn run() -> Result<u8> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::SendContext(options) => {
+        Command::SendContext {
+            transfer: options,
+            progress,
+            no_notify,
+        } => {
             let result: Result<()> = (|| {
                 let path = resolve_path_from_context(&context_from_environment()?)?;
                 let response = transfer(
@@ -183,17 +214,27 @@ fn run() -> Result<u8> {
                     endpoint_for_context(&options)?,
                     sender_token_path()?,
                     &options,
+                    |event| {
+                        // A closed progress reader must not abort the transfer.
+                        if progress {
+                            let _ = writeln!(io::stdout(), "{}", event.to_line());
+                        }
+                    },
                 )?;
-                notify_herdr(
-                    "Herdr download complete",
-                    &format!("Saved {}", response["path"].as_str().unwrap_or_default()),
-                    "success",
-                );
+                if !no_notify {
+                    notify_herdr(
+                        "Herdr download complete",
+                        &format!("Saved {}", response["path"].as_str().unwrap_or_default()),
+                        "success",
+                    );
+                }
                 println!("{}", serde_json::to_string(&response)?);
                 Ok(())
             })();
             if let Err(error) = &result {
-                notify_herdr("Herdr download failed", &format!("{error:#}"), "error");
+                if !no_notify {
+                    notify_herdr("Herdr download failed", &format!("{error:#}"), "error");
+                }
             }
             result?;
         }
@@ -212,6 +253,7 @@ fn run() -> Result<u8> {
                 endpoint_for_send(&host, &options),
                 token_file,
                 &options,
+                |_| {},
             )?;
             println!("{}", serde_json::to_string(&response)?);
         }
@@ -229,6 +271,7 @@ fn run() -> Result<u8> {
             download_dir,
             token_file,
             max_mb,
+            after_save,
             verbose,
         } => {
             let token_file = match token_file {
@@ -244,6 +287,7 @@ fn run() -> Result<u8> {
                 },
                 token: read_token(&token_file)?,
                 max_bytes: bytes_from_megabytes(max_mb)?,
+                after_save: after_save.after_save,
                 verbose,
             })?;
         }
@@ -252,6 +296,7 @@ fn run() -> Result<u8> {
             port,
             download_dir,
             token_file,
+            after_save,
         } => {
             let download_dir = match download_dir {
                 Some(path) => path,
@@ -261,7 +306,13 @@ fn run() -> Result<u8> {
                 Some(path) => path,
                 None => default_token_path()?,
             };
-            let plist = install_service(binary.as_deref(), &token_file, &download_dir, port)?;
+            let plist = install_service(
+                binary.as_deref(),
+                &token_file,
+                &download_dir,
+                port,
+                after_save.after_save,
+            )?;
             println!("{}", plist.display());
         }
         Command::ServiceStatus => {
@@ -306,6 +357,22 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn after_save_defaults_to_reveal_and_accepts_none() {
+        let parse = |arguments: &[&str]| match Cli::try_parse_from(arguments).unwrap().command {
+            Command::Serve { after_save, .. } => after_save.after_save,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            parse(&["herdr-remote-download", "serve"]),
+            AfterSave::Reveal
+        );
+        assert_eq!(
+            parse(&["herdr-remote-download", "serve", "--after-save", "none"]),
+            AfterSave::Leave
+        );
     }
 
     #[test]
