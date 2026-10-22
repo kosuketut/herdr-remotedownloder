@@ -6,6 +6,8 @@ dates.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-23
+
 ### Added
 
 - Opening the picker switches the connected Mac to an ASCII-capable input source
@@ -197,7 +199,8 @@ reconnect Herdr.
   with a random token and verified with SHA-256. The default limit is 512 MiB,
   and existing files are never overwritten.
 
-[Unreleased]: https://github.com/kosuketut/herdr-remotedownloder/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/kosuketut/herdr-remotedownloder/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/kosuketut/herdr-remotedownloder/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/kosuketut/herdr-remotedownloder/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/kosuketut/herdr-remotedownloder/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/kosuketut/herdr-remotedownloder/compare/v0.3.0...v0.4.0
