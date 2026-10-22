@@ -23,6 +23,10 @@ use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 use serde_json::{json, Value};
 
+mod context_view;
+mod picker;
+mod source_cwd;
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -37,42 +41,35 @@ fn run() -> Result<()> {
     switch_mac_to_ascii_input();
     let socket_path = std::env::var_os("HERDR_SOCKET_PATH")
         .context("HERDR_SOCKET_PATH is not set; open this through the Herdr plugin action")?;
-    let (pane_id, pane_cwd) = focused_pane_context()?;
+    let (pane_id, _launch_cwd) = focused_pane_context()?;
     let mut client = SocketClient::connect(Path::new(&socket_path))?;
-    let text = client.read_visible_pane(&pane_id)?;
-    let pane_width = client
-        .visible_pane_width(&pane_id)
-        .ok()
-        .map(visible_wrap_width);
-    let matcher = file_matcher()?;
-    let mut app = match pane_width {
-        Some(width) => {
-            App::from_text_with_theme_and_pane_width(&text, &matcher, Theme::default(), width)
-        }
-        None => App::from_text_with_theme(&text, &matcher, Theme::default()),
-    };
-    filter_existing_file_targets(&mut app, &pane_cwd);
+    let (mut app, mut picker, mut pane_cwd) =
+        read_picker(&mut client, &pane_id, Path::new(&socket_path))?;
 
     let _restore = TerminalRestore;
     let mut terminal = ratatui::init();
+    crossterm::execute!(std::io::stdout(), event::EnableMouseCapture)?;
     let outcome = loop {
-        terminal.draw(|frame| draw(frame, &app))?;
+        terminal.draw(|frame| picker.draw(frame, &app))?;
         match event::read()? {
-            Event::Key(key) => {
-                // Enter also sends a multi selection; Tab toggles the mode.
-                let character = if app.multi_mode && key.code == KeyCode::Enter {
-                    Some('\t')
-                } else {
-                    key_to_char(key)
-                };
-                if let Some(character) = character {
-                    match app.handle_char(character) {
-                        Outcome::Continue => {}
-                        other => break other,
-                    }
+            Event::Key(key) if is_refresh_key(key) => {
+                let refreshed = read_picker(&mut client, &pane_id, Path::new(&socket_path));
+                apply_refresh(&mut app, &mut picker, &mut pane_cwd, refreshed);
+            }
+            Event::Key(key) => match picker.handle_key(&mut app, key) {
+                Outcome::Continue => {}
+                other => break other,
+            },
+            Event::Resize(_, _) => {}
+            Event::Mouse(mouse) if picker.refresh_clicked(mouse) => {
+                let refreshed = read_picker(&mut client, &pane_id, Path::new(&socket_path));
+                apply_refresh(&mut app, &mut picker, &mut pane_cwd, refreshed);
+            }
+            Event::Mouse(mouse) => {
+                if picker.handle_mouse(mouse) {
+                    app.message = None;
                 }
             }
-            Event::Resize(_, _) => {}
             _ => {}
         }
     };
@@ -135,6 +132,70 @@ fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn read_picker(
+    client: &mut SocketClient,
+    pane_id: &str,
+    socket_path: &Path,
+) -> Result<(App, picker::Picker, PathBuf)> {
+    let pane_cwd = source_cwd::read(socket_path, pane_id)?;
+    let text = client.read_visible_pane(pane_id)?;
+    let width = client
+        .visible_pane_width(pane_id)
+        .ok()
+        .map(visible_wrap_width);
+    if source_cwd::read(socket_path, pane_id)? != pane_cwd {
+        bail!("source directory changed while reading; reopen the picker");
+    }
+    let (app, picker) = build_picker(&text, &pane_cwd, width)?;
+    Ok((app, picker, pane_cwd))
+}
+
+fn build_picker(
+    text: &str,
+    pane_cwd: &Path,
+    width: Option<usize>,
+) -> Result<(App, picker::Picker)> {
+    let matcher = file_matcher()?;
+    let mut app = match width {
+        Some(width) => {
+            App::from_text_with_theme_and_pane_width(text, &matcher, Theme::default(), width)
+        }
+        None => App::from_text_with_theme(text, &matcher, Theme::default()),
+    };
+    filter_existing_file_targets(&mut app, pane_cwd);
+    let picker = picker::Picker::new(&app, pane_cwd)?;
+    Ok((app, picker))
+}
+
+fn is_refresh_key(key: KeyEvent) -> bool {
+    key.kind != event::KeyEventKind::Release
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('r' | 'R'))
+}
+
+fn apply_refresh(
+    app: &mut App,
+    picker: &mut picker::Picker,
+    pane_cwd: &mut PathBuf,
+    refreshed: Result<(App, picker::Picker, PathBuf)>,
+) {
+    match refreshed {
+        Ok((mut updated, replacement, directory)) => {
+            updated.message = Some(format!(
+                "Refreshed: {} files; hints rebuilt, selections cleared.",
+                updated.targets.len()
+            ));
+            *app = updated;
+            *picker = replacement;
+            *pane_cwd = directory;
+        }
+        Err(error) => {
+            // A failed read must not discard the old snapshot or selection.
+            app.message = Some(format!("Refresh failed; kept previous snapshot: {error:#}"));
+        }
+    }
 }
 
 /// Hints are typed as letters, which a Japanese IME on the Mac would capture.
@@ -318,71 +379,6 @@ impl Drop for SenderTemporaryDirectory {
     }
 }
 
-fn draw(frame: &mut Frame<'_>, app: &App) {
-    let area = frame.area();
-    let line_count = usize::from(area.height.saturating_sub(1));
-    let lines = if app.targets.is_empty() {
-        vec![Line::from(Span::styled(
-            "No existing file paths on this visible screen.",
-            app.theme.empty_style(),
-        ))]
-    } else {
-        herdr_tiny_fingers::ui::render_lines(app, line_count)
-    };
-    frame.render_widget(Paragraph::new(lines), area);
-    draw_status(frame, app, area);
-}
-
-fn draw_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    if area.height == 0 {
-        return;
-    }
-    let status_area = Rect {
-        x: area.x,
-        y: area.y + area.height - 1,
-        width: area.width,
-        height: 1,
-    };
-    let input = if app.input.is_empty() {
-        "-"
-    } else {
-        &app.input
-    };
-    let (mode, keys) = if app.multi_mode {
-        (
-            format!("multi selected:{}", app.selected_target_count()),
-            "tab/enter:send",
-        )
-    } else {
-        ("single".to_string(), "tab:multi")
-    };
-    let message = app
-        .message
-        .as_deref()
-        .map(|message| format!("{message}  "))
-        .unwrap_or_default();
-    let full = format!(
-        " download  {mode}  files:{}  input:{}  {message}{keys}  esc:close ",
-        app.visible_target_count(),
-        input
-    );
-    let compact = format!(
-        " download {mode} files:{} input:{} ",
-        app.visible_target_count(),
-        input
-    );
-    let width = usize::from(status_area.width);
-    let status = if full.chars().count() <= width {
-        full
-    } else {
-        compact.chars().take(width).collect()
-    };
-    frame.render_widget(
-        Paragraph::new(status).style(app.theme.status_style()),
-        status_area,
-    );
-}
-
 struct TransferView<'a> {
     paths: &'a [String],
     index: usize,
@@ -513,6 +509,7 @@ struct TerminalRestore;
 
 impl Drop for TerminalRestore {
     fn drop(&mut self) {
+        let _ = crossterm::execute!(std::io::stdout(), event::DisableMouseCapture);
         ratatui::restore();
     }
 }
@@ -525,6 +522,101 @@ mod tests {
     fn visible_width_excludes_the_terminal_right_edge() {
         assert_eq!(visible_wrap_width(118), 117);
         assert_eq!(visible_wrap_width(1), 1);
+    }
+
+    #[test]
+    fn refresh_is_explicit_and_clears_stale_selection_and_hint_input() {
+        let temporary = SenderTemporaryDirectory::create().unwrap();
+        for name in ["one.md", "two.md"] {
+            fs::write(temporary.0.join(name), b"fixture").unwrap();
+        }
+        let (mut app, mut picker) = build_picker("one.md", &temporary.0, None).unwrap();
+        app.multi_mode = true;
+        app.selected_hints = vec![app.targets[0].hint.clone()];
+        app.input = "a".to_string();
+        let mut cwd = temporary.0.clone();
+        let refreshed = build_picker("two.md one.md", &temporary.0, Some(80))
+            .map(|(app, picker)| (app, picker, temporary.0.clone()));
+        apply_refresh(&mut app, &mut picker, &mut cwd, refreshed);
+        assert_eq!(app.targets.len(), 2);
+        assert_eq!(app.targets[0].target.text, "two.md");
+        assert!(!app.multi_mode);
+        assert!(app.selected_hints.is_empty());
+        assert!(app.input.is_empty());
+        assert!(app
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("hints rebuilt, selections cleared"));
+        assert!(is_refresh_key(KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_refresh_key(KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::NONE
+        )));
+        assert!(!is_refresh_key(KeyEvent::new_with_kind(
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL,
+            event::KeyEventKind::Release,
+        )));
+    }
+
+    #[test]
+    fn failed_refresh_preserves_snapshot_and_selection() {
+        let temporary = SenderTemporaryDirectory::create().unwrap();
+        fs::write(temporary.0.join("one.md"), b"fixture").unwrap();
+        let (mut app, mut picker) = build_picker("one.md", &temporary.0, None).unwrap();
+        app.multi_mode = true;
+        app.selected_hints = vec![app.targets[0].hint.clone()];
+        let selected = app.selected_hints.clone();
+        let mut cwd = temporary.0.clone();
+        apply_refresh(
+            &mut app,
+            &mut picker,
+            &mut cwd,
+            Err(anyhow::anyhow!("source pane closed")),
+        );
+        assert_eq!(cwd, temporary.0);
+        assert_eq!(app.lines, ["one.md"]);
+        assert_eq!(app.targets.len(), 1);
+        assert_eq!(app.selected_hints, selected);
+        assert!(app.multi_mode);
+        assert!(app
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("kept previous snapshot"));
+    }
+
+    #[test]
+    fn refresh_rebinds_same_named_relative_file_to_the_new_source_directory() {
+        let temporary = SenderTemporaryDirectory::create().unwrap();
+        let first = temporary.0.join("A");
+        let second = temporary.0.join("B");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        fs::write(first.join("result.md"), b"old directory").unwrap();
+        fs::write(second.join("result.md"), b"new directory").unwrap();
+        let (mut app, mut picker) = build_picker("result.md", &first, None).unwrap();
+        let mut cwd = first;
+        let (updated, replacement) = build_picker("result.md", &second, None).unwrap();
+        apply_refresh(
+            &mut app,
+            &mut picker,
+            &mut cwd,
+            Ok((updated, replacement, second.clone())),
+        );
+        let actual_send_path = herdr_remote_download::transfer::resolve_path_from_context(&json!({
+            "selected_text": app.targets[0].target.text,
+            "focused_pane_cwd": cwd,
+        }))
+        .unwrap();
+        assert_eq!(
+            actual_send_path,
+            second.join("result.md").canonicalize().unwrap()
+        );
     }
 
     #[test]
@@ -653,7 +745,7 @@ mod tests {
 
     #[test]
     fn sender_output_reports_progress_and_saved_path() {
-        let script = "printf 'progress hashing\\nprogress sending 2 4\\n{\\\"path\\\":\\\"/Users/me/Downloads/a.txt\\\"}\\n'";
+        let script = "printf 'progress hashing\\nprogress sending 2 4\\n{\"path\":\"/Users/me/Downloads/a.txt\"}\\n'";
         let mut child = Command::new("sh")
             .args(["-c", script])
             .stdout(Stdio::piped())
