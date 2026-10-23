@@ -7,13 +7,18 @@ English | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 A Herdr plugin that transfers files in both directions between a
 `herdr --remote` host and the connected Mac.
 
-Compare highlighted conversation context with a full-path file list, select
-with arrow keys or hint characters, or transfer files from
-`file://` links displayed by Codex, Claude, and other tools. It supports regular
-files of any extension, including PDFs, PPTX files, images, and archives;
-directories are archived and extracted automatically. In
-the other direction, choose one or more Mac files and save them to the focused
-remote pane's current directory.
+| | Download: remote → Mac | Upload: Mac → remote |
+| --- | --- | --- |
+| Key | `prefix+d` | `prefix+u` |
+| Choose | File paths shown in the focused pane | One or more files in the Mac file dialog |
+| Saved to | `~/Downloads` on the Mac | The focused pane's current directory |
+| Folders | Archived and extracted automatically | Not supported; choose files |
+
+To download, compare highlighted conversation context with a full-path file
+list and select with arrow keys or hint characters, or Control-click a
+`file://` link displayed by Codex, Claude, and other tools. Both directions
+transfer regular files of any extension, including PDFs, PPTX files, images,
+and archives.
 
 ## How it works
 
@@ -242,11 +247,20 @@ whence -w hr
 
 ## Usage
 
-### First download after setup
+Both directions start from the focused remote pane. With Herdr's default
+prefix, press **Ctrl+B**, release it, then press **d** or **u**. If you changed
+the prefix, use your configured prefix instead.
 
-1. Focus the remote pane containing the file reference. With Herdr's default
-   prefix, press **Ctrl+B**, release it, then press **d**. If you changed the
-   prefix, use your configured prefix followed by `d`.
+| Key | Direction | Action |
+| --- | --- | --- |
+| `prefix+d` | Download: remote → Mac | `kosukeyano.remote-download.pick` |
+| `prefix+u` | Upload: Mac → remote | `kosukeyano.remote-download.upload` |
+
+### Download: remote → Mac
+
+#### First download after setup
+
+1. Focus the remote pane containing the file reference and press `prefix+d`.
 2. Match a highlighted `[hint]` in the left snapshot to the same hint and full
    path on the right.
 3. Press Right to activate the file list, use Up/Down to choose a file, and
@@ -255,7 +269,7 @@ whence -w hr
    also reveals it. A `:line` suffix identifies a reference; the whole file
    is downloaded.
 
-### Select a visible file path
+#### Select a visible file path
 
 Press `prefix+d` to open one download overlay with two views. The left view
 (about 70% of the width) is a read-only conversation snapshot. Existing paths
@@ -313,7 +327,18 @@ You can also invoke the action directly:
 herdr plugin action invoke kosukeyano.remote-download.pick
 ```
 
-### After a file arrives on the Mac
+#### Download from a `file://` link
+
+Control-click a `file://` link displayed by Codex, Claude, or another tool in
+Herdr to transfer its target. On macOS, Control is the modifier Herdr captures
+for link actions.
+
+#### Download from selected text
+
+Select a file path and invoke the
+`kosukeyano.remote-download.download` action directly.
+
+#### After a file arrives on the Mac
 
 By default the Mac selects each downloaded file in Finder. To open files with
 their default app instead, or to do nothing, reinstall the transfer service
@@ -327,24 +352,24 @@ with `--after-save`:
 run code (such as `.command`, `.sh`, `.app`, or `.pkg`) are only revealed, even
 with `open`.
 
-### Download from a `file://` link
+### Upload: Mac → remote
 
-Control-click a `file://` link displayed by Codex, Claude, or another tool in
-Herdr to transfer its target. On macOS, Control is the modifier Herdr captures
-for link actions.
+#### First upload after setup
 
-### Download from selected text
+1. Focus the destination remote pane. Files are saved in its current
+   directory, so `cd` there first.
+2. Press `prefix+u`. The overlay asks you to choose files on the Mac.
+3. In the Mac file dialog, choose one or more regular files. Use Command or
+   Shift to select several.
+4. The overlay shows the file number, filename, percentage, and received bytes
+   during transfer, then the saved paths. Press Enter to close it.
 
-Select a file path and invoke the
-`kosukeyano.remote-download.download` action directly.
+An existing file is never overwritten: a second `report.pdf` is saved as
+`report (1).pdf`. Folders cannot be chosen in the dialog, so archive a folder
+on the Mac first. If you cancel the dialog, the overlay reports
+`file selection was cancelled`; press Enter to close it.
 
-### Upload from the Mac
-
-Focus the destination pane and press `prefix+u`. Choose one or more regular
-files in the Mac dialog using Command or Shift. The plugin saves them in that
-pane's current directory. The overlay shows the current file number, filename,
-percentage, and received bytes during transfer, then the saved paths. Press
-Enter to close it.
+You can also invoke the action directly:
 
 ```sh
 herdr plugin action invoke kosukeyano.remote-download.upload
@@ -352,7 +377,8 @@ herdr plugin action invoke kosukeyano.remote-download.upload
 
 ## Limitations
 
-- Directories are archived as `.tar.gz` automatically and extracted into a new folder in the download directory. Symlinks and special files inside the archive are skipped.
+- Downloaded directories are archived as `.tar.gz` automatically and extracted into a new folder in the download directory. Symlinks and special files inside the archive are skipped.
+- Uploads accept regular files only; the Mac dialog does not allow choosing folders.
 - Files larger than 512 MiB each are rejected by default. Set `HERDR_DOWNLOAD_MAX_MB` on both sides (for example `2048`, or `0` for unlimited), or pass `--max-mb`.
 - Automatic transfer-service startup uses launchd on macOS and a systemd user service on Linux.
 - The SSH `RemoteForward` and authentication token must be configured for each remote host.
@@ -373,7 +399,8 @@ If the SSH tunnel is lost during a transfer, the picker displays the failure
 after you select the file: within about a second when the tunnel is down, or
 within about 20 seconds when it does not answer. On a lossy network the first
 answer through an idle tunnel can be slow, so the check is retried once
-automatically. Press Esc or Enter to close it.
+automatically. Press Esc or Enter to close it. An upload shows the reason after
+`Upload failed:` in its overlay; press Enter to close it.
 With the LaunchAgent tunnel, retry after about a minute; each connection attempt
 is timestamped in its log. With the manual setup, reconnect Herdr.
 

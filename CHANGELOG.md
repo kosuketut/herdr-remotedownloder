@@ -6,6 +6,11 @@ dates.
 
 ## [Unreleased]
 
+### Changed
+
+- The English, Japanese, and Simplified Chinese READMEs present download and
+  upload side by side, with a usage section for each direction.
+
 ## [0.7.0] - 2026-10-23
 
 ### Added
