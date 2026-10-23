@@ -7,10 +7,27 @@
 这是一个 Herdr 插件，用于在 `herdr --remote` 远程主机与连接端 Mac 之间
 双向传输文件。
 
-您可以对照高亮的对话快照和完整路径列表，用方向键或提示字符选择文件，也可以传输 Codex、Claude
-等工具显示的 `file://` 链接。它支持任何扩展名的常规文件，包括 PDF、PPTX、
-图像和压缩包；目录会自动打包并解压。反向传输时，可以在 Mac 上选择一个或多个文件，并将其保存到当前聚焦的
-远程 pane 工作目录。
+| | 下载：远程 → Mac | 上传：Mac → 远程 |
+| --- | --- | --- |
+| 按键 | `prefix+d` | `prefix+u` |
+| 选择方式 | 当前聚焦 pane 中显示的文件路径 | 在 Mac 文件对话框中选择一个或多个文件 |
+| 保存位置 | Mac 上的 `~/Downloads` | 当前聚焦 pane 的工作目录 |
+| 目录 | 自动打包并解压 | 不支持，请选择文件 |
+
+下载时，您可以对照高亮的对话快照和完整路径列表，用方向键或提示字符选择文件，
+也可以按住 Control 单击 Codex、Claude 等工具显示的 `file://` 链接。两个方向都
+支持任何扩展名的常规文件，包括 PDF、PPTX、图像和压缩包。
+
+## 演示
+
+**下载：** 按 `prefix+d`，输入 `report.pdf` 旁边的提示字母，文件会保存到 Mac 的
+`~/Downloads`，并在 Finder 中显示。
+
+![下载演示：选择器列出 pane 中的文件路径，report.pdf 保存到 Mac 的下载文件夹](docs/demo-download.gif)
+
+**上传：** 按 `prefix+u`，在 Mac 对话框中选择两个文件，它们会保存到 pane 的当前工作目录。
+
+![上传演示：在 Mac 对话框中选择的两个文件保存到远程主机的 ~/herdr-demo/inbox](docs/demo-upload.gif)
 
 ## 工作原理
 
@@ -195,16 +212,25 @@ whence -w hr
 
 ## 使用方法
 
-### 完成配对后的第一次下载
+两个方向都从当前聚焦的远程 pane 开始。默认前缀下，先按 **Ctrl+B**，松开，
+再按 **d** 或 **u**。如果改过前缀，则使用自己的前缀键。
 
-1. 点击包含文件引用的远程 pane。默认前缀下，先按 **Ctrl+B**，松开，再按 **d**。
-   如果改过前缀，则使用自己的前缀键后再按 `d`。
+| 按键 | 方向 | action |
+| --- | --- | --- |
+| `prefix+d` | 下载：远程 → Mac | `kosukeyano.remote-download.pick` |
+| `prefix+u` | 上传：Mac → 远程 | `kosukeyano.remote-download.upload` |
+
+### 下载：远程 → Mac
+
+#### 完成配对后的第一次下载
+
+1. 点击包含文件引用的远程 pane，然后按 `prefix+d`。
 2. 将左侧高亮的 `[提示键]` 与右侧相同提示键、完整路径对照。
 3. 按右方向键进入文件列表，用 ↑↓ 选择文件，再按 Enter；也可以直接输入提示字母。
 4. 默认情况下，文件保存到 Mac 的 `~/Downloads`，Finder 也会显示下载结果。
    `:行号` 用于定位引用，下载的是整个文件。
 
-### 选择当前屏幕显示的文件路径
+#### 选择当前屏幕显示的文件路径
 
 按 `prefix+d` 打开一个包含两栏的下载窗口。左侧约占 70%，显示打开时的只读
 对话快照；可下载路径提亮并附有 `[a]`、`[s]` 等提示键，保留原路径字符。
@@ -248,22 +274,32 @@ Esc 只关闭下载窗口。两栏属于同一个下载器，点击或滚动左�
 herdr plugin action invoke kosukeyano.remote-download.pick
 ```
 
-### 从 `file://` 链接下载
+#### 从 `file://` 链接下载
 
 在 Herdr 中按住 Control 并单击 Codex、Claude 或其他工具显示的 `file://`
 链接，即可传输链接目标。在 macOS 上，Herdr 使用 Control 作为链接操作的修饰键。
 
-### 从选中文本下载
+#### 从选中文本下载
 
 选择一个文件路径，然后直接调用
 `kosukeyano.remote-download.download` action。
 
-### 从 Mac 上传到远程主机
+### 上传：Mac → 远程
 
-聚焦目标 pane 后按 `prefix+u`。在 Mac 对话框中使用 Command 或 Shift 选择一个或
-多个常规文件，插件会将它们保存到该 pane 的当前工作目录，并在 overlay 中显示
-当前文件序号、文件名、进度百分比和已接收大小，完成后显示保存路径。按 Enter
-关闭。
+#### 完成配对后的第一次上传
+
+1. 聚焦目标远程 pane。文件会保存到该 pane 的当前工作目录，因此请先 `cd` 到
+   目标目录。
+2. 按 `prefix+u`。overlay 会提示您在 Mac 上选择文件。
+3. 在 Mac 文件对话框中选择一个或多个常规文件；使用 Command 或 Shift 多选。
+4. 传输过程中，overlay 显示当前文件序号、文件名、进度百分比和已接收大小，
+   完成后显示保存路径。按 Enter 关闭。
+
+已有文件不会被覆盖：第二个 `report.pdf` 会保存为 `report (1).pdf`。对话框中
+无法选择文件夹，请先在 Mac 上将文件夹打包。如果取消对话框，overlay 会显示
+`file selection was cancelled`，按 Enter 关闭。
+
+也可以直接调用 action：
 
 ```sh
 herdr plugin action invoke kosukeyano.remote-download.upload
@@ -271,7 +307,8 @@ herdr plugin action invoke kosukeyano.remote-download.upload
 
 ## 限制
 
-- 目录会自动打包为 `.tar.gz`，并在下载目录下的新文件夹中解压。其中的符号链接和特殊文件会被跳过。
+- 下载的目录会自动打包为 `.tar.gz`，并在下载目录下的新文件夹中解压。其中的符号链接和特殊文件会被跳过。
+- 上传只支持常规文件；Mac 对话框中无法选择文件夹。
 - 默认情况下会拒绝单个大于 512 MiB 的文件。在连接双方设置 `HERDR_DOWNLOAD_MAX_MB`（例如 `2048`，`0` 表示不限制），或使用 `--max-mb` 参数即可调整。
 - 传输服务自启动在 macOS 上使用 launchd，在 Linux 上使用 systemd 用户服务。
 - 每台远程主机都需要单独配置 SSH `RemoteForward`和认证令牌。
@@ -291,7 +328,8 @@ herdr plugin action invoke kosukeyano.remote-download.upload
 如果传输过程中 SSH 隧道断开，选择文件后会在选择器中显示失败原因：隧道已断开时
 约 1 秒，无响应时约 20 秒。在丢包的网络中，空闲隧道的首次响应可能较慢，因此会
 自动重试一次连接检查。
-按 Esc 或 Enter 关闭，然后重新连接 Herdr。
+按 Esc 或 Enter 关闭，然后重新连接 Herdr。上传时，overlay 会在 `Upload failed:`
+之后显示原因，按 Enter 关闭。
 
 ## 开发
 
