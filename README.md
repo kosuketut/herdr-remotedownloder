@@ -20,6 +20,18 @@ list and select with arrow keys or hint characters, or Control-click a
 transfer regular files of any extension, including PDFs, PPTX files, images,
 and archives.
 
+## Demo
+
+**Download:** press `prefix+d`, type the hint shown next to `report.pdf`, and
+Finder reveals the file in `~/Downloads`.
+
+![Download demo: the picker lists file paths from the pane, and report.pdf appears in the Mac Downloads folder](docs/demo-download.gif)
+
+**Upload:** press `prefix+u`, choose two files in the Mac dialog, and they are
+saved in the pane's current directory.
+
+![Upload demo: two files chosen in the Mac dialog are saved in ~/herdr-demo/inbox on the remote host](docs/demo-upload.gif)
+
 ## How it works
 
 Herdr plugins run on the remote host, so a small transfer service runs on the

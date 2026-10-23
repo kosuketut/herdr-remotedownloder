@@ -19,6 +19,18 @@ Herdrプラグインです。
 転送できます。どちらの方向も、PDF、PPTX、画像、アーカイブなど、拡張子に関係なく
 通常のファイルを転送します。
 
+## デモ
+
+**ダウンロード:** `prefix+d` を押し、`report.pdf` の横のヒント文字を入力すると、
+Macの `~/Downloads` に保存され、Finderで表示されます。
+
+![ダウンロードのデモ: pickerがpaneのファイルパスを一覧表示し、report.pdfがMacのダウンロードフォルダに保存される](docs/demo-download.gif)
+
+**アップロード:** `prefix+u` を押し、Macのダイアログで2つのファイルを選ぶと、
+paneのcwdに保存されます。
+
+![アップロードのデモ: Macのダイアログで選んだ2つのファイルがremoteの~/herdr-demo/inboxに保存される](docs/demo-upload.gif)
+
 ## 仕組み
 
 Herdrのプラグインは接続先で動作するため、接続元Macで小さな転送サービスを

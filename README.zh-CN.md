@@ -18,6 +18,17 @@
 也可以按住 Control 单击 Codex、Claude 等工具显示的 `file://` 链接。两个方向都
 支持任何扩展名的常规文件，包括 PDF、PPTX、图像和压缩包。
 
+## 演示
+
+**下载：** 按 `prefix+d`，输入 `report.pdf` 旁边的提示字母，文件会保存到 Mac 的
+`~/Downloads`，并在 Finder 中显示。
+
+![下载演示：选择器列出 pane 中的文件路径，report.pdf 保存到 Mac 的下载文件夹](docs/demo-download.gif)
+
+**上传：** 按 `prefix+u`，在 Mac 对话框中选择两个文件，它们会保存到 pane 的当前工作目录。
+
+![上传演示：在 Mac 对话框中选择的两个文件保存到远程主机的 ~/herdr-demo/inbox](docs/demo-upload.gif)
+
 ## 工作原理
 
 Herdr 插件运行在远程主机上，因此需要在连接端 Mac 上启动一个小型传输服务。

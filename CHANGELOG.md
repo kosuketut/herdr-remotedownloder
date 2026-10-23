@@ -6,6 +6,10 @@ dates.
 
 ## [Unreleased]
 
+### Added
+
+- Demo GIFs of a download and an upload near the top of every README.
+
 ### Changed
 
 - The English, Japanese, and Simplified Chinese READMEs present download and
